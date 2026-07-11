@@ -1,3 +1,11 @@
+
+Mohamed Gamal Eldin Abdelaziz Noureldin
+Conciseness Framework Initiative
+mz.gamal@gmail.com  |  ORCID: 0009-0006-3991-1153
+DOI:https://doi.org/10.5281/zenodo.21302600
+DOI:https://doi.org/10.5281/zenodo.21184139
+DOI:https://doi.org/10.5281/zenodo.20854874
+
 # CKT Actualizer Engine
 
 A production-ready implementation of the Computational Knowledge Theory (CKT) Actualizer Engine.
