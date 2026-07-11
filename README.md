@@ -23,11 +23,11 @@ pip install -e .
 ## Usage
 
 See `examples/run_lifecycle_demo.py` for a full demonstration of the cognitive lifecycle.
-see '01_Theory_and_Algorithm'
-See '03_Tests_and_Benchmarks' for the tests and benchmarks.
-See '04_Visualizations' for visualizations.
-see '05_Demo'
-see '06_Publication'
+##see '01_Theory_and_Algorithm'##
+##See '03_Tests_and_Benchmarks' for the tests and benchmarks.##
+##See '04_Visualizations' for visualizations.##
+##see '05_Demo'##
+##see '06_Publication'##
 ##
 # Unified Framework: FDSA Pre-Inference Pruner and Actualizer Engine
 ## A Production-Ready Pipeline for Constrained, Drift-Stable Autoregressive Generation
