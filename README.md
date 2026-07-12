@@ -10,7 +10,7 @@
 
 # CKT Actualizer Engine
 
-A production-ready implementation of the Computational Knowledge Theory (CKT) Actualizer Engine.
+implementation of the Computational Knowledge Theory (CKT) and Actualizer Engine.
 
 This engine coordinates the generation of candidate thoughts using the Actualizer steering loop, applies epistemic verification filters (Pipeline A & C), and crystallizes highly concise thoughts into MCE objects.
 
