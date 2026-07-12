@@ -14,16 +14,11 @@ A production-ready implementation of the Computational Knowledge Theory (CKT) Ac
 
 This engine coordinates the generation of candidate thoughts using the Actualizer steering loop, applies epistemic verification filters (Pipeline A & C), and crystallizes highly concise thoughts into MCE objects.
 
-## Installation
-
-```bash
-pip install -e .
-```
 
 ## Usage
 
 See `examples/run_lifecycle_demo.py` for a full demonstration of the cognitive lifecycle.
-**see '01_Theory_and_Algorithm', '03_Tests_and_Benchmarks', '04_Visualizations' '05_Demo', and '06_Publication'**
+**see '01_Theory_and_Algorithm', '03_Tests_and_Benchmarks', '04_Visualizations' '05_Demo', and '06_Publication', '07_CKT_Core' **
 
 # Unified Framework: FDSA Pre-Inference Pruner and Actualizer Engine
 ## A Production-Ready Pipeline for Constrained, Drift-Stable Autoregressive Generation
