@@ -777,6 +777,8 @@ The following table provides a complete, single-view mapping of every phase of t
 8. **Mann, W. R.** (1953). Mean value methods in iteration. *Proceedings of the American Mathematical Society*, 4(3), 506–510.
 9. **Kullback, S., & Leibler, R. A.** (1951). On information and sufficiency. *Annals of Mathematical Statistics*, 22(1), 79–86.
 10. **Cover, T. M., & Thomas, J. A.** (2006). *Elements of Information Theory* (2nd ed.). Wiley-Interscience.
+11. **Noureldin, M. G. A.** (2026). The Actualizer Engine: A Prime-Constrained Decoding
+Pipeline (v1_u1). Zenodo. https://doi.org/10.5281/zenodo.21184139
 
 ---
 
