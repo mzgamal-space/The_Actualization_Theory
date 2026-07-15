@@ -5,12 +5,21 @@ Author : Mohamed Gamal Eldin Abdelaziz Noureldin
          (Conciseness Framework / CKT)
 Code   : Antigravity (Advanced Agentic Coding)
 
-Implements the full PBI Cognitive Life Cycle:
+Extends the canonical ActualizerEngine (02_Core_Engine/actualizer_engine.py)
+with the full CKT Cognitive Life Cycle:
 
   Stage A0 — Question Operator Parsing (DIEPT Epistemic Architecture Triple)
-  Stage 1  — Thought Generation via FDSA (Fractal Deduction Search)
+  Stage 1  — Thought Generation via FDSA (pre-inference pruning + Banach steer)
   Stage 2  — Epistemic Verification (Pipeline A: Justice, Pipeline C: Negentropy)
   Stage 3  — Crystallization into MCE Class + Linguistic Modality Assignment
+
+Architecture
+------------
+  UpgradedActualizerEngine wraps ActualizerEngine from 02_Core_Engine:
+    - steer_next_token()  delegates the Banach contraction loop to
+      ActualizerEngine.steer() — no duplication of drift/vacuum/contraction logic.
+    - Pre-inference FDSA pruning is delegated to VectorizedFDSAPruner (fdsa.py).
+    - Crystallization logic (CAKI, MCE construction) is CKT-exclusive.
 
 Mathematical bounds enforced
 -----------------------------
@@ -19,8 +28,7 @@ Mathematical bounds enforced
     I_max = I_in + delta_finite        (delta_finite > 0 encodes the unsimulable boundary)
 
   Banach Contraction Principle:
-    Each FDSA steering step applies a k-contractive mapping on U until
-    the L2-norm delta <= Q_c (convergence).
+    Delegated entirely to ActualizerEngine.steer().
 
   Justice Dominance Constraint:
     lambda_L > lambda_R  and  lambda_L > lambda_D  (enforced in EpistemicVerificationSuite)
@@ -31,19 +39,25 @@ Mathematical bounds enforced
 """
 
 from __future__ import annotations
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "02_Core_Engine"))
+
 import math
 from typing import Dict, List, Optional, Set, Tuple
 
-from mce import MCE, ReferenceDomain
+# Canonical base engine — Banach contraction loop lives here.
+from actualizer_engine import ActualizerEngine
+
+from mce import MCE
+from fdsa import CKTFractalDeductionSearch, VectorizedFDSAPruner
 from thought import CandidateThought
 from filters import EpistemicVerificationSuite
-from fdsa import FractalDeductionSearch, VectorizedFDSAPruner
 from diept import QuestionOperatorParser, DIEPTState
 
 
 class UpgradedActualizerEngine:
     """
-    Upgraded Actualizer Engine — full CKT Cognitive Lifecycle.
+    CKT Cognitive Life Cycle — wraps ActualizerEngine + adds MCE crystallization.
 
     Parameters
     ----------
@@ -69,14 +83,20 @@ class UpgradedActualizerEngine:
         delta_finite: float = 0.5,
     ) -> None:
         self.V              = vocab_size
-        self.k              = k_contractive
-        self.Q_c            = Q_c
-        self.tau            = tau
         self.caki_threshold = caki_threshold
         self.delta_finite   = delta_finite
 
-        self.fdsa_search = FractalDeductionSearch()
-        self.pruner      = VectorizedFDSAPruner(self.V, self.fdsa_search)
+        # Canonical Banach contraction engine (02_Core_Engine)
+        self._base_engine = ActualizerEngine(
+            vocab_size=vocab_size,
+            k=k_contractive,
+            Q_c=Q_c,
+            tau=tau,
+        )
+
+        # CKT-exclusive components
+        self.fdsa_search = CKTFractalDeductionSearch()
+        self.pruner      = VectorizedFDSAPruner(vocab_size, self.fdsa_search)
         self.verifier    = EpistemicVerificationSuite(
             cwf_penalty_matrix=cwf_penalty_matrix,
             theta_target=theta_target,
@@ -86,56 +106,8 @@ class UpgradedActualizerEngine:
         )
 
     # ------------------------------------------------------------------
-    # Core Steering Logic — Contractive Actualization Loop
+    # Core Steering Logic — delegates to ActualizerEngine
     # ------------------------------------------------------------------
-
-    def _softmax(self, logits: List[float]) -> List[float]:
-        max_l  = max(x for x in logits if x != -math.inf)
-        exp_l, valid_idx = [], []
-        for i, x in enumerate(logits):
-            if x != -math.inf:
-                exp_l.append(math.exp(x - max_l))
-                valid_idx.append(i)
-        total  = sum(exp_l) or 1.0
-        probs  = [0.0] * self.V
-        for j, i in enumerate(valid_idx):
-            probs[i] = exp_l[j] / total
-        return probs
-
-    def compute_drift_tensor(
-        self,
-        U: List[float],
-        history: List[int],
-        target_tokens: Set[int],
-    ) -> List[float]:
-        """
-        Drift weights: Order (w_L), Justice (w_G), Knowledge (w_F).
-        """
-        w_L, w_G, w_F = 0.35, 0.35, 0.20
-        D = [0.0] * self.V
-
-        # Local Recency Drift (Order Prime)
-        for step_back, tok in enumerate(reversed(history[-8:])):
-            if 0 <= tok < self.V:
-                D[tok] += w_L * 2.0 * math.exp(-0.4 * step_back)
-
-        # Global Drift (Justice) + Future Drift (Knowledge)
-        for v in range(self.V):
-            if U[v] == 0.0:
-                continue
-            if v not in target_tokens:
-                D[v] += w_G * 1.5
-            D[v] += w_F * (-math.log(max(U[v], 1e-12)) * 0.08)
-
-        return D
-
-    def apply_vacuum_brake(
-        self, U: List[float], D: List[float]
-    ) -> List[float]:
-        decay    = [math.exp(-d / self.tau) for d in D]
-        U_braked = [U[i] * decay[i] for i in range(self.V)]
-        total    = sum(U_braked) or 1.0
-        return [x / total for x in U_braked]
 
     def steer_next_token(
         self,
@@ -143,33 +115,28 @@ class UpgradedActualizerEngine:
         history: List[int],
         target_tokens: Set[int],
         context_type: str = "general",
-    ) -> Tuple[int, List[float], float, int, ReferenceDomain, float]:
+    ) -> Tuple[int, List[float], float, int, object, float]:
         """
-        Pre-inference FDSA pruning -> contractive actualization loop.
-        Returns (selected_token, U, final_drift, iterations, anchor_domain, similarity).
+        Pre-inference FDSA pruning → Banach contractive actualization (delegated).
+
+        Returns (selected_token, U_final, final_drift, iterations, anchor_domain, similarity).
         """
-        # Stage 1-a: FDSA Vocabulary Pruning
+        # Phase 1: FDSA Vocabulary Pruning (CKT-exclusive, 4-tuple return)
         pruned_logits, _, anchor_domain, similarity = self.pruner.prune_vocabulary(
             logits, history[-1] if history else -1, {}, context_type
         )
 
-        # Stage 1-b: Contractive Banach mapping
-        U       = self._softmax(pruned_logits)
-        k_step  = anchor_domain.k
+        # Phase 2+3: Full Banach contraction loop — delegated to canonical engine.
+        # The base engine uses the anchor domain's k via its own internal k.
+        # We temporarily override k with the anchor domain's k for this step.
+        saved_k = self._base_engine.k
+        self._base_engine.k = anchor_domain.k
+        selected_token, U_final, final_drift, iterations = self._base_engine.steer(
+            pruned_logits, history, target_tokens
+        )
+        self._base_engine.k = saved_k
 
-        for iteration in range(1, 21):
-            U_prev = U[:]
-            D      = self.compute_drift_tensor(U, history, target_tokens)
-            U_b    = self.apply_vacuum_brake(U, D)
-            U      = [k_step * U_b[v] + (1.0 - k_step) * U_prev[v]
-                      for v in range(self.V)]
-            delta  = math.sqrt(sum((U[v] - U_prev[v]) ** 2 for v in range(self.V)))
-            if delta <= self.Q_c:
-                break
-
-        selected_token = max(range(self.V), key=lambda v: U[v])
-        final_drift    = self.compute_drift_tensor(U, history, target_tokens)[selected_token]
-        return selected_token, U, final_drift, iteration, anchor_domain, similarity
+        return selected_token, U_final, final_drift, iterations, anchor_domain, similarity
 
     # ------------------------------------------------------------------
     # CAKI — Concise Accumulated Knowledge Index
@@ -221,7 +188,7 @@ class UpgradedActualizerEngine:
         description: str = "",
     ) -> Tuple[bool, Optional[MCE], float]:
         """
-        Pipeline A -> Pipeline C -> CAKI -> Crystallization gate.
+        Pipeline A → Pipeline C → CAKI → Crystallization gate.
 
         Crystallization conditions (Knowledge Accumulation Law):
           1. CAKI >= caki_threshold   (stable, concise thought)
@@ -240,7 +207,7 @@ class UpgradedActualizerEngine:
         caki, L_viol, R, I_eff = self.calculate_caki(thought)
 
         if caki >= self.caki_threshold and delta_C_R <= 0.0:
-            # MCE metrics
+            # MCE structural metrics (from class MCE.docx definitions)
             mass       = (thought.primes["Justice"]
                           * thought.primes["Knowledge"]
                           * len(thought.causal_chain))
@@ -265,6 +232,7 @@ class UpgradedActualizerEngine:
                 description=description,
             )
 
+            # Inject crystallized MCE into the FDSA library for future anchoring.
             self.fdsa_search.add_reference_domain(mce_obj)
             return True, mce_obj, caki
 
@@ -287,7 +255,7 @@ class UpgradedActualizerEngine:
         End-to-end PBI Cognitive Life Cycle:
 
         Stage A0 — Parse Question Operator -> Epistemic Architecture Triple.
-        Stage 1  — Generate causal chain via FDSA contractive loop.
+        Stage 1  — Generate causal chain via FDSA + ActualizerEngine.steer().
         Stage 2  — Verify via Pipelines A & C; compute C(R) and CAKI.
         Stage 3  — Crystallize into MCE; assign Linguistic Modality.
 
@@ -299,7 +267,7 @@ class UpgradedActualizerEngine:
         )
         self.verifier.theta_target = theta_target
 
-        # Stage 1 — FDSA token steering (2 steps)
+        # Stage 1 — FDSA pruning + Banach steer (2 steps)
         chain            = list(initial_history)
         total_propensity = 1.0
         for _ in range(2):

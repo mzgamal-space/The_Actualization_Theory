@@ -4,7 +4,6 @@ demo_pipeline.py -- Interactive Step-by-Step Pipeline Demonstration
 Author : Mohamed Gamal Eldin Abdelaziz Noureldin
          Independent Researcher | ORCID: 0009-0006-3991-1153
          Contact: mz.gamal@gmail.com
-         DIO : https://doi.org/10.5281/zenodo.21302600
 
 WHAT THIS DEMO SHOWS
 ---------------------

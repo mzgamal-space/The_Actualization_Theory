@@ -5,11 +5,13 @@ Author : Mohamed Gamal Eldin Abdelaziz Noureldin
          (Conciseness Framework / CKT)
 Code   : Antigravity (Advanced Agentic Coding)
 
-Implements:
-  1. FractalDeductionSearch — Isomorphic anchoring against physical reference
-     domains and crystallized MCE knowledge objects.
-  2. VectorizedFDSAPruner  — High-performance pre-inference vocabulary pruner
-     using FDSA dimensional truncation (Banach contraction).
+Wraps the canonical FDSA implementation in 02_Core_Engine/fdsa_pruner.py and
+extends VectorizedFDSAPruner with:
+  - Dynamic MCE-aware library (crystallized knowledge injected at runtime).
+  - Extended prune_vocabulary() returning 4-tuple
+    (pruned_logits, active_count, anchor_domain, similarity) for the CKT
+    engine's steer_next_token() to consume.
+  - Additional DIEPT-derived context profiles for Stage A0 domain lenses.
 
 Mathematical foundations
 ------------------------
@@ -19,148 +21,72 @@ Mathematical foundations
 """
 
 from __future__ import annotations
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "02_Core_Engine"))
+
 import math
 from typing import Dict, List, Optional, Set, Tuple
 
-from mce import ReferenceDomain, MCE
+# Import canonical base classes from 02_Core_Engine (single source of truth).
+from fdsa_pruner import ReferenceDomain, FractalDeductionSearch
 from exceptions import AnalogyLibraryEmptyError
 
-
-# ---------------------------------------------------------------------------
-# Built-in analogy library
-# ---------------------------------------------------------------------------
-
-DEFAULT_LIBRARY: List[ReferenceDomain] = [
-    ReferenceDomain(
-        "Resistor_Equilibrium",
-        [0.40, 0.30, 0.10, 0.10, 0.10],
-        k=0.35,
-        description=(
-            "Electrical resistor network reaching Kirchhoff voltage equilibrium. "
-            "High Order (current routing obeys strict laws) and Justice (load "
-            "balancing across nodes). Best analogy for constraint-satisfaction, "
-            "code generation, and logical reasoning tasks."
-        ),
-    ),
-    ReferenceDomain(
-        "Fermat_Least_Time",
-        [0.60, 0.10, 0.10, 0.10, 0.10],
-        k=0.45,
-        description=(
-            "Fermat's principle of least time (optics). Extreme Order — the path "
-            "taken is always the globally optimal path. Best analogy for shortest-"
-            "path problems, mathematical proof steps, and planning tasks."
-        ),
-    ),
-    ReferenceDomain(
-        "Cellular_Homeostasis",
-        [0.20, 0.20, 0.30, 0.20, 0.10],
-        k=0.50,
-        description=(
-            "Biological cell maintaining homeostatic equilibrium across membrane "
-            "potentials. High Mercy (graceful adaptation) and Knowledge (predictive "
-            "biochemical signalling). Best analogy for creative, open-ended, or "
-            "narrative generation tasks."
-        ),
-    ),
-]
+from mce import MCE
 
 
 # ---------------------------------------------------------------------------
-# FractalDeductionSearch
+# CKTFractalDeductionSearch — extends base with MCE dynamic library support
 # ---------------------------------------------------------------------------
 
-class FractalDeductionSearch:
+class CKTFractalDeductionSearch(FractalDeductionSearch):
     """
-    FDSA engine with dynamic isomorphic anchoring.
+    Extends the base FractalDeductionSearch with MCE-aware dynamic library.
 
-    Maintains a library of ReferenceDomain / MCE objects.
-    On every query the engine selects the best-matching domain via cosine
-    similarity on the five-dimensional Prime profile vector, then projects
-    its Banach constant k to derive the permitted Fractal Dimension D.
+    Crystallized MCE objects can be added at runtime via add_reference_domain(),
+    making them immediately available as isomorphic anchors for future FDSA
+    searches (dynamic knowledge accumulation).
     """
-
-    def __init__(
-        self, analogy_library: Optional[List[ReferenceDomain]] = None
-    ) -> None:
-        self.library: List[ReferenceDomain] = (
-            list(analogy_library) if analogy_library is not None
-            else list(DEFAULT_LIBRARY)
-        )
 
     def add_reference_domain(self, domain: ReferenceDomain) -> None:
         """Dynamically appends a new ReferenceDomain or MCE to the library."""
         self.library.append(domain)
 
-    # ---- similarity ----
 
-    @staticmethod
-    def _cosine_similarity(a: List[float], b: List[float]) -> float:
-        dot   = sum(x * y for x, y in zip(a, b))
-        mag_a = math.sqrt(sum(x ** 2 for x in a))
-        mag_b = math.sqrt(sum(x ** 2 for x in b))
-        if mag_a == 0 or mag_b == 0:
-            return 0.0
-        return dot / (mag_a * mag_b)
-
-    # ---- isomorphic anchoring ----
-
-    def isomorphic_anchoring(
-        self, P_unknown: List[float]
-    ) -> Tuple[ReferenceDomain, float]:
-        """
-        Finds the best-matching domain for the given Prime profile P_unknown.
-        Returns (best_domain, cosine_similarity).
-        """
-        if not self.library:
-            raise AnalogyLibraryEmptyError("Analogy library is empty.")
-        best_domain, best_sim = self.library[0], -1.0
-        for domain in self.library:
-            sim = self._cosine_similarity(P_unknown, domain.profile)
-            if sim > best_sim:
-                best_sim, best_domain = sim, domain
-        return best_domain, best_sim
-
-    # ---- fractal dimension ----
-
-    @staticmethod
-    def fractal_dimension(N: int, k: float) -> float:
-        """
-        D = ln(N) / ln(1/k)
-        Computes the permitted complexity dimension under contraction k.
-        """
-        if not (0 < k < 1):
-            k = 0.45
-        return math.log(N) / math.log(1.0 / k)
+# Re-export for backward compatibility with test imports.
+FractalDeductionSearch = CKTFractalDeductionSearch
 
 
 # ---------------------------------------------------------------------------
-# VectorizedFDSAPruner
+# CKTVectorizedFDSAPruner — extends base with 4-tuple return and DIEPT profiles
 # ---------------------------------------------------------------------------
 
 class VectorizedFDSAPruner:
     """
-    High-performance pre-inference vocabulary pruner using FDSA.
+    CKT-extended pre-inference vocabulary pruner.
 
-    Maps context type -> Prime profile -> isomorphic anchoring -> k -> D_limit.
-    Masks logits below the dimensional threshold to -inf.
+    Wraps the base VectorizedFDSAPruner logic but uses a CKTFractalDeductionSearch
+    instance (so the MCE library is shared with the engine) and returns a 4-tuple:
+        (pruned_logits, active_count, anchor_domain, similarity)
+
+    Additional context profiles for DIEPT Stage A0 domain lenses are included.
     """
 
+    # Unified context profiles: base + DIEPT Stage A0 domain lenses.
     CONTEXT_PROFILES: Dict[str, List[float]] = {
-        "logical_coding"    : [0.50, 0.30, 0.05, 0.10, 0.05],
-        "creative_dialogue" : [0.10, 0.10, 0.40, 0.10, 0.30],
-        "mathematical"      : [0.55, 0.25, 0.05, 0.10, 0.05],
-        "factual_qa"        : [0.35, 0.35, 0.10, 0.15, 0.05],
-        "general"           : [0.20, 0.20, 0.20, 0.20, 0.20],
-        # Dynamic contexts (DIEPT Stage A0 domain lenses)
-        "Causal_Law"        : [0.40, 0.50, 0.02, 0.05, 0.03],
-        "OpenCI_Speculation": [0.10, 0.05, 0.50, 0.25, 0.10],
-        "Wisdom_Evaluation" : [0.20, 0.20, 0.20, 0.20, 0.20],
+        "logical_coding"      : [0.50, 0.30, 0.05, 0.10, 0.05],
+        "creative_dialogue"   : [0.10, 0.10, 0.40, 0.10, 0.30],
+        "mathematical"        : [0.55, 0.25, 0.05, 0.10, 0.05],
+        "factual_qa"          : [0.35, 0.35, 0.10, 0.15, 0.05],
+        "general"             : [0.20, 0.20, 0.20, 0.20, 0.20],
+        # DIEPT Stage A0 domain lenses
+        "Causal_Law"          : [0.40, 0.50, 0.02, 0.05, 0.03],
+        "OpenCI_Speculation"  : [0.10, 0.05, 0.50, 0.25, 0.10],
+        "Wisdom_Evaluation"   : [0.20, 0.20, 0.20, 0.20, 0.20],
         "Procedural_Knowledge": [0.35, 0.30, 0.15, 0.15, 0.05],
-        "General_Purpose"   : [0.20, 0.20, 0.20, 0.20, 0.20],
+        "General_Purpose"     : [0.20, 0.20, 0.20, 0.20, 0.20],
     }
 
-    def __init__(self, vocab_size: int, fdsa_search: FractalDeductionSearch) -> None:
+    def __init__(self, vocab_size: int, fdsa_search: CKTFractalDeductionSearch) -> None:
         self.V    = vocab_size
         self.fdsa = fdsa_search
 
@@ -180,8 +106,8 @@ class VectorizedFDSAPruner:
             context_type, self.CONTEXT_PROFILES["general"]
         )
         domain, similarity = self.fdsa.isomorphic_anchoring(profile)
-        k_ref   = domain.k
-        D_limit = self.fdsa.fractal_dimension(self.V, k_ref)
+        k_ref     = domain.k
+        D_limit   = self.fdsa.fractal_dimension(self.V, k_ref)
         threshold = -D_limit * 1.5
 
         allowed: Optional[Set[int]] = (
