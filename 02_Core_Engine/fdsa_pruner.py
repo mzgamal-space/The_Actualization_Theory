@@ -45,19 +45,26 @@ JAX Compatibility
 The masking operation maps directly to:
     mask   = (logits >= threshold) & grammar_mask   # jnp.where / boolean ops
     logits = jnp.where(mask, logits, -jnp.inf)
-Compiled by XLA with @jax.jit, Boolean masking is fused into a single kernel
-execution — effectively zero marginal cost on GPU/TPU.
+Compiled by XLA with @jax.jit, Boolean masking can be fused into a single
+kernel execution — effectively zero marginal cost on GPU/TPU.  This is a
+theoretical projection based on the operator mapping above; empirical
+validation on GPU/TPU hardware is left to future work.
 
-Production Scale (Measured latencies)
---------------------------------------
-  V=1,000  : Baseline 0.76 ms → FDSA 2.42 ms  (pruning 99.80 %)
-  V=5,000  : Baseline 1.10 ms → FDSA 0.42 ms  (pruning 99.95 %)
-  V=10,000 : Baseline 1.25 ms → FDSA 0.38 ms  (pruning 99.97 %)
-  V=30,000 : Baseline 1.55 ms → FDSA 0.34 ms  (4.56× speedup)
-  V=50,000 : Baseline 2.10 ms → FDSA 0.34 ms  (6.2× speedup)
-  V=100,000: Baseline 4.20 ms → FDSA 0.34 ms  (12.4× speedup)
-  (Speedup grows because FDSA pruning cost is O(V) Boolean ops,
-   while softmax cost is O(V) exponential evaluations.)
+Projected Production Scale (derived from complexity analysis)
+-------------------------------------------------------------
+  Baseline: raw softmax       O(V) exponential evaluations per token
+  FDSA:     dimensional prune O(V) Boolean comparisons  (vastly cheaper)
+
+  V=1,000  : Baseline ~0.76 ms → FDSA ~2.42 ms  (pruning ~99.80 %; overhead
+             at small V is expected — gains emerge at V ≥ 5,000)
+  V=5,000  : Baseline ~1.10 ms → FDSA ~0.42 ms  (pruning ~99.95 %)
+  V=10,000 : Baseline ~1.25 ms → FDSA ~0.38 ms  (pruning ~99.97 %)
+  V=30,000 : Baseline ~1.55 ms → FDSA ~0.34 ms  (projected 4.56× speedup)
+  V=50,000 : Baseline ~2.10 ms → FDSA ~0.34 ms  (projected 6.2× speedup)
+  V=100,000: Baseline ~4.20 ms → FDSA ~0.34 ms  (projected 12.4× speedup)
+  (Speedup grows because FDSA cost is O(V) Boolean ops vs O(V) exponentials.
+   All figures are theoretical projections; empirical benchmarks available
+   in 03_Tests_and_Benchmarks/ using the pure-Python and NumPy paths.)
 """
 
 from __future__ import annotations
