@@ -95,9 +95,10 @@ def run(
         results["fdsa_ms"].append(round(fdsa_ms, 4))
         results["reduction_pct"].append(round(reduction, 2))
 
-        print(f"  N={n:2d} | Combinatorial: {comb_nodes:>10,} | FDSA: {fdsa_nodes:>8,} | "
+        print(f"  N={n:2d} | Combinatorial: {comb_nodes:>12,}  |   FDSA: {fdsa_nodes:>8,} | "
               f"Reduction: {reduction:.1f}%")
 
+   
     return results
 
 

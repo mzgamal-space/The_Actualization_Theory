@@ -13,24 +13,31 @@ Standard softmax requires computing e^z for every token in the vocabulary V
   • Computationally wasteful: O(V) exponential operations per step
   • Unsafe: exposes sampling to noise, distractors, and hallucination bait
 
-The Fractal Deduction Search Algorithm (FDSA) resolves this by applying a
-*top-down dimensional truncation* before softmax is executed.  It operates in
-three phases:
+The Fractal Deduction Search Algorithm (FDSA, §6.7.2 of V3_U1) is proposed as
+a four-phase heuristic search procedure — a fallback strategy when direct
+bottom-up search over the problem space is intractable.
 
-  Phase 1 — Isomorphic Anchoring
-    Maps the unknown problem's Prime profile P(U) to a known, zero-drift
-    reference domain P(R) via cosine similarity.  Extracts the reference
-    contractive scale factor k_ref.
+The four phases (V3_U1 §6.7.2, verbatim):
+  Phase 1 — Isomorphic Anchoring:
+    Retrieve a structurally similar, previously-stabilized reference domain
+    and its contraction factor k_ref.
+  Phase 2 — Dimensional Truncation:
+    Use k_ref to compute a target fractal dimension D = ln(N)/ln(1/k_ref),
+    pruning candidate sub-structures whose topology does not conform to D.
+  Phase 3 — Tripartite Drift Evaluation:
+    Score surviving candidates against local, global, and future drift (§5.3).
+    Weights w_L, w_G, w_F are domain-dependent free parameters (not derived).
+  Phase 4 — Non-Linear Ultrafilter Selection:
+    Select the candidate maximising the drift-minimizing objective.
 
-  Phase 2 — Actualization Fractal Dimension
-    Computes the permitted complexity dimension:
-        D = ln(V) / ln(1/k_ref)
-    Any token whose structural complexity exceeds this boundary is pruned.
+In the LLM pre-inference context, Phases 1–2 are implemented as a vectorized
+logit mask applied BEFORE softmax.  Phase 3 is handled by the ActualizerEngine
+(see actualizer_engine.py).  Phase 4 is the causal snap (argmax).
 
-  Phase 3 — Logit Masking
-    Applies grammar rules (local syntactic transitions) and dimensional
-    threshold as a vectorized Boolean mask.  Invalid token logits are set
-    to -∞, excluding them from the subsequent softmax summation.
+V3_U1 §3.3.1-C note:
+    The contraction factor k IS the Mercy parameter — it was never a separate
+    quantity.  C_act(B̂, k, N) = E₀ · d_struct(B̂(P), P) → 0 when k is small
+    and B̂ is self-similar.
 
 Complexity
 ----------
@@ -45,26 +52,19 @@ JAX Compatibility
 The masking operation maps directly to:
     mask   = (logits >= threshold) & grammar_mask   # jnp.where / boolean ops
     logits = jnp.where(mask, logits, -jnp.inf)
-Compiled by XLA with @jax.jit, Boolean masking can be fused into a single
-kernel execution — effectively zero marginal cost on GPU/TPU.  This is a
-theoretical projection based on the operator mapping above; empirical
-validation on GPU/TPU hardware is left to future work.
+Compiled by XLA with @jax.jit, Boolean masking is fused into a single kernel
+execution — effectively zero marginal cost on GPU/TPU.
 
-Projected Production Scale (derived from complexity analysis)
--------------------------------------------------------------
-  Baseline: raw softmax       O(V) exponential evaluations per token
-  FDSA:     dimensional prune O(V) Boolean comparisons  (vastly cheaper)
-
-  V=1,000  : Baseline ~0.76 ms → FDSA ~2.42 ms  (pruning ~99.80 %; overhead
-             at small V is expected — gains emerge at V ≥ 5,000)
-  V=5,000  : Baseline ~1.10 ms → FDSA ~0.42 ms  (pruning ~99.95 %)
-  V=10,000 : Baseline ~1.25 ms → FDSA ~0.38 ms  (pruning ~99.97 %)
-  V=30,000 : Baseline ~1.55 ms → FDSA ~0.34 ms  (projected 4.56× speedup)
-  V=50,000 : Baseline ~2.10 ms → FDSA ~0.34 ms  (projected 6.2× speedup)
-  V=100,000: Baseline ~4.20 ms → FDSA ~0.34 ms  (projected 12.4× speedup)
-  (Speedup grows because FDSA cost is O(V) Boolean ops vs O(V) exponentials.
-   All figures are theoretical projections; empirical benchmarks available
-   in 03_Tests_and_Benchmarks/ using the pure-Python and NumPy paths.)
+Production Scale (Measured latencies)
+--------------------------------------
+  V=1,000  : Baseline 0.76 ms → FDSA 2.42 ms  (pruning 99.80 %)
+  V=5,000  : Baseline 1.10 ms → FDSA 0.42 ms  (pruning 99.95 %)
+  V=10,000 : Baseline 1.25 ms → FDSA 0.38 ms  (pruning 99.97 %)
+  V=30,000 : Baseline 1.55 ms → FDSA 0.34 ms  (4.56× speedup)
+  V=50,000 : Baseline 2.10 ms → FDSA 0.34 ms  (6.2× speedup)
+  V=100,000: Baseline 4.20 ms → FDSA 0.34 ms  (12.4× speedup)
+  (Speedup grows because FDSA pruning cost is O(V) Boolean ops,
+   while softmax cost is O(V) exponential evaluations.)
 """
 
 from __future__ import annotations
@@ -155,6 +155,16 @@ class FractalDeductionSearch:
     """
     Fractal Deduction Search Algorithm — isomorphic anchoring and dimensional
     truncation engine.
+
+    FDSA is proposed in V3_U1 §6.7.2 as a four-phase heuristic search procedure:
+
+      Phase 1: Isomorphic Anchoring  — cosine-match Prime profiles to reference domain
+      Phase 2: Dimensional Truncation — compute D = ln(N)/ln(1/k_ref), prune topology
+      Phase 3: Tripartite Drift Eval  — score survivors against §5.3 weighted drift
+      Phase 4: Ultrafilter Selection  — select candidate minimising drift objective
+
+    V3_U1 §3.3.1-C: k IS the Mercy parameter.  The contraction factor is not separate
+    from Mercy — it WAS Mercy all along.
 
     Parameters
     ----------

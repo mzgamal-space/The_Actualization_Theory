@@ -1,8 +1,13 @@
 """
-test_01_hallucination.py — Hallucination Resistance Test
+test_01_hallucination.py — Hallucination Resistance Test  [V3_U1 updated]
 ==========================================================
 Injects a strong distractor token (logit +8.0) at every generation step.
 Measures how many steps remain factually grounded after 30 tokens.
+
+V3_U1 changes:
+  - engine.steer() now returns 6-tuple: (token, U, Tr_D, iters, nu_history, actualized)
+  - tracks nu_t (valuation trajectory) and actualized (bifurcation branch) per step
+  - mercy_k replaces k in ActualizerEngine constructor
 
 Returns a dict of results for use by generate_all_charts.py.
 """
@@ -25,7 +30,7 @@ def run(vocab_size: int = 500, steps: int = 30, seed: int = 0) -> dict:
     target_tokens = set(range(50, 100))
 
     pruner = VectorizedFDSAPruner(vocab_size=vocab_size, k=0.35)
-    engine = ActualizerEngine(vocab_size=vocab_size, k=0.45, Q_c=1e-5)
+    engine = ActualizerEngine(vocab_size=vocab_size, mercy_k=0.45, Q_c=1e-5)
 
     hist_base   = [50]
     hist_fdsa   = [50]
@@ -60,7 +65,9 @@ def run(vocab_size: int = 500, steps: int = 30, seed: int = 0) -> dict:
 
         # --- FDSA + Actualizer ---
         pruned, _ = pruner.prune_vocabulary(logits, hist_fdsa[-1], grammar, "logical_coding")
-        tok_a, _, _, _ = engine.steer(pruned, hist_fdsa, target_tokens)
+        tok_a, _, Tr_D, n_iters, nu_hist, actualized = engine.steer(
+            pruned, hist_fdsa, target_tokens
+        )
         hist_fdsa.append(tok_a)
         grounded_a = tok_a in grammar.get(hist_fdsa[-2], set())
         if not grounded_a:
@@ -77,6 +84,7 @@ def run(vocab_size: int = 500, steps: int = 30, seed: int = 0) -> dict:
         "fdsa_rate"      : round((steps - fdsa_errors) / steps * 100, 2),
         "base_seq"       : hist_base,
         "fdsa_seq"       : hist_fdsa,
+        "v3u1"           : "steer() returns 6-tuple: (token, U, Tr_D, iters, nu_history, actualized)",
     }
 
 

@@ -1,9 +1,13 @@
 """
-test_02_repetition_stress.py — Repetition Loop Suppression Test
+test_02_repetition_stress.py — Repetition Loop Suppression Test  [V3_U1 updated]
 =================================================================
 Forces the recent token history to be filled with one repeated token.
 Measures whether the Actualizer's Order Prime successfully suppresses
 the repeating token and redirects probability mass to valid alternatives.
+
+V3_U1 changes:
+  - mercy_k replaces k; steer() returns 6-tuple
+  - nu_final per step collected to show actualization progress
 
 Returns a dict of results for use by generate_all_charts.py.
 """
@@ -26,7 +30,7 @@ def run(vocab_size: int = 300, steps: int = 40, seed: int = 42) -> dict:
     grammar[149] = {100, 105}
 
     pruner = VectorizedFDSAPruner(vocab_size=vocab_size, k=0.35)
-    engine = ActualizerEngine(vocab_size=vocab_size, k=0.45, Q_c=1e-5,
+    engine = ActualizerEngine(vocab_size=vocab_size, mercy_k=0.45, Q_c=1e-5,
                                repetition_penalty=3.0)
 
     repeated_token = 100   # the token that will be forced into history
@@ -61,7 +65,9 @@ def run(vocab_size: int = 300, steps: int = 40, seed: int = 42) -> dict:
 
         # --- FDSA + Actualizer ---
         pruned, _ = pruner.prune_vocabulary(logits, hist_fdsa[-1], grammar, "logical_coding")
-        tok_a, _, _, _ = engine.steer(pruned, hist_fdsa, target_tokens)
+        tok_a, _, Tr_D, n_iters, nu_hist, actualized = engine.steer(
+            pruned, hist_fdsa, target_tokens
+        )
         hist_fdsa.append(tok_a)
         fdsa_repeat_counts.append(1 if tok_a == repeated_token else 0)
 

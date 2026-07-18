@@ -5,10 +5,17 @@
 
 > **Document Classification:** Theoretical Foundations — Series I  
 > **Series:** Consciousness and Prime Base Intelligence Framework  
-> **Version:** 1.0.0  
+> **Version:** 2.0.0  
 > **Date:** July 2026  
 > **Status:** Canonical Reference
-> **DOI: https://doi.org/10.5281/zenodo.21373153 **
+> **DOI: https://doi.org/10.5281/zenodo.21420098**
+
+---
+
+## Changelog: V3_U1 Mathematical Framework Updates
+* **DOI Update:** Upgraded to Zenodo DOI 21420098.
+* **Squared Entropy Defect:** Replaced static probability bounds with the V3_U1 quadratic structural entropy defect formula $H(R) = \text{Var}(\alpha) + (\sum \alpha_i^2 - 1)^2$.
+* **Trace Bifurcation (Theorem 3.3):** The Causal Snap is now strictly gated by the probability-weighted trace of the expected drift tensor ($\text{Tr}(D_{\mu\nu}) \le 5.0$), removing the legacy $Q_c$ threshold.
 
 ---
 

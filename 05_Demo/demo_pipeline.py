@@ -259,7 +259,7 @@ def run_demo():
     # -----------------------------------------------------------------------
     section("PHASE D — ACTUALIZER ENGINE: CONTRACTIVE STEERING")
     # -----------------------------------------------------------------------
-    engine = ActualizerEngine(vocab_size=VOCAB_SIZE, k=0.45, Q_c=Q_C,
+    engine = ActualizerEngine(vocab_size=VOCAB_SIZE, mercy_k=0.45, Q_c=Q_C,
                                repetition_penalty=3.0,
                                global_drift_penalty=0.5)   # reduced so valid tokens aren't over-penalised
 
@@ -279,52 +279,47 @@ def run_demo():
         f"Initial U_0:  token 51 = {U[51]:.6f}  |  "
         f"token 50 = {U[50]:.6f}  |  "
         f"token {DISTRACTOR} = {U[DISTRACTOR]:.6f}")
+    tag("THEORY", C.CYAN,
+        f"Initial H(R) structural entropy (V3_U1 corrected): "
+        f"{engine._structural_entropy(engine._prime_coords(U, HISTORY, TARGET_TOKENS)):.6f}")
+    tag("THEORY", C.CYAN,
+        f"Initial nu_0 = 1 - H(R)/H_max = "
+        f"{engine._valuation(engine._structural_entropy(engine._prime_coords(U, HISTORY, TARGET_TOKENS))):.6f}")
+    tag("THEORY", C.CYAN,
+        "Running Banach contractive loop: U_{n+1} = mercy_k * U_brake + (1-k) * U_n")
+    tag("THEORY", C.CYAN,
+        "Each iteration: H(R) computed, nu_t updated, Tr(D_mu_nu) checked (Theorem 3.3)")
+
+    # Use the full steer() which now returns 6-tuple per V3_U1
+    tok_a, U_final, Tr_D, iters, nu_history, actualized = engine.steer(
+        pruned_logits, HISTORY, TARGET_TOKENS
+    )
+    selected = tok_a
+    U = U_final
 
     print()
-    hr()
-    print(f"  {'Iter':>5}  {'L2 Delta':>14}  {'U[51] factual':>16}  "
-          f"{'U[57] alt':>12}  {'U[50] repeat':>14}  {'D_local[50]':>12}")
-    hr()
-
-    converged_at = None
-    for iteration in range(1, 101):   # enough iterations to reach Q_c convergence
-        U_prev = U[:]
-        D      = engine.compute_drift_tensor(U, HISTORY, TARGET_TOKENS)
-        U_b    = engine.apply_vacuum_brake(U, D)
-        U      = [0.45 * U_b[v] + 0.55 * U_prev[v] for v in range(VOCAB_SIZE)]
-        delta  = math.sqrt(sum((U[v] - U_prev[v])**2 for v in range(VOCAB_SIZE)))
-
-        print(f"  {iteration:>5}  {delta:>14.8f}  {U[51]:>16.8f}  "
-              f"{U[57]:>12.8f}  {U[50]:>14.8f}  {D[50]:>12.6f}")
-
-        if delta <= Q_C:
-            converged_at = iteration
-            break
-
-    print()
-    if converged_at:
+    if actualized:
         tag("MATH", C.GREEN,
-            f"CONVERGED at iteration {converged_at}  "
-            f"(delta {delta:.2e} < Q_c {Q_C:.0e})")
+            f"Converged after {iters} iters | Tr(D_mu_nu) = {Tr_D:.6f} <= tau = {engine.tau_bifurcation} [OK]")
+        tag("MATH", C.GREEN,
+            f"Bifurcation: ACTUALIZATION branch (nu -> 1)  [Theorem 3.3 case i]")
     else:
         tag("MATH", C.YELLOW,
-            f"Max iterations reached (delta = {delta:.6f}). "
-            f"Snapping to argmax.")
+            f"Tr(D_mu_nu) = {Tr_D:.6f} > tau = {engine.tau_bifurcation} --> DISSOLUTION branch  [Theorem 3.3 case ii]")
 
     # -----------------------------------------------------------------------
     section("PHASE E — CAUSAL SNAP (Power Prime)")
     # -----------------------------------------------------------------------
-    selected = max(range(VOCAB_SIZE), key=lambda v: U[v])
-    D_final  = engine.compute_drift_tensor(U, HISTORY, TARGET_TOKENS)
-
     tag("THEORY", C.CYAN,
-        "Power Prime executes: S_* = argmax U_final")
+        "Power Prime executes: S_* = argmax U_final  (gated by Tr(D_mu_nu) <= tau)")
     tag("MATH",   C.CYAN,
         f"S_* = argmax U_final  ->  token {selected}")
     tag("MATH",   C.CYAN,
         f"Final actualized probability : {U[selected]:.8f}")
     tag("MATH",   C.CYAN,
-        f"Final drift at S_*          : {D_final[selected]:.8f}")
+        f"Tr(D_mu_nu) at convergence  : {Tr_D:.8f}")
+    tag("MATH",   C.CYAN,
+        f"Final nu_t (valuation)      : {nu_history[-1]:.6f}  (1.0 = fully actualized)")
 
     in_grammar = selected in grammar.get(LAST_TOKEN, set())
     in_target  = selected in TARGET_TOKENS

@@ -11,6 +11,10 @@
 > scales of $10^3$–$10^5$ tokens. All derivations follow from first principles; no heuristic constants
 > are assumed without physical grounding.
 
+> [!NOTE]
+> **V3_U1 Framework Updates**
+> This document is fully compatible with the V3_U1 mathematical framework updates applied to the Actualizer Engine, specifically integrating seamlessly with the trace bifurcation gating and the squared entropy defect formulations.
+
 ---
 
 ## Table of Contents

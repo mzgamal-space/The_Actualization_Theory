@@ -10,6 +10,10 @@
 
 > **Abstract.** Modern large language model (LLM) inference suffers from two distinct but entangled failure modes: *vocabulary bloat*, in which the model distributes non-negligible probability mass over semantically irrelevant tokens, and *distributional drift*, in which successive token choices diverge from a target semantic attractor. The **Finite Dimensional Semantic Anchoring (FDSA) Pre-Inference Pruner** addresses the first pathology by collapsing the effective vocabulary to a grammatically-anchored, semantically coherent subspace before sampling occurs. The **Actualizer Engine** addresses the second by iteratively contracting the probability distribution toward a causal-semantic fixed point. This document presents the *unified production pipeline* that composes these two systems into a single, JIT-compilable inference pass. We prove that the composition order is canonically determined, characterise the shared algebraic invariant that couples the two subsystems, and demonstrate sub-millisecond end-to-end latency on TPU v5 lite hardware at a 32 k-token vocabulary.
 
+> [!NOTE]
+> **V3_U1 Framework Updates**
+> This Unified Framework supports the latest V3_U1 mathematical standards, utilizing the probability-weighted trace of the drift tensor to gate the Causal Snap (Theorem 3.3) and operating under the squared entropy defect metric for stabilization scaling.
+
 ---
 
 ## Table of Contents

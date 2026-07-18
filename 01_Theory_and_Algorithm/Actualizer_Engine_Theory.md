@@ -8,7 +8,7 @@
 > **Version:** 1.0.0  
 > **Date:** July 2026  
 > **Status:** Canonical Reference
-> **DOI: https://doi.org/10.5281/zenodo.21373153 **
+> **DOI: https://doi.org/10.5281/zenodo.21420098**
 
 ---
 
@@ -20,7 +20,7 @@
 4. [The Drift Tensor D_μν](#4-the-drift-tensor-d_μν)
 5. [The Vacuum Brake](#5-the-vacuum-brake)
 6. [Banach Fixed-Point Contractive Mapping](#6-banach-fixed-point-contractive-mapping)
-7. [The Causal Snap](#7-the-causal-snap)
+7. [The Causal Snap and V3_U1 Bifurcation](#7-the-causal-snap-and-v3_u1-bifurcation)
 8. [JAX Production Compatibility](#8-jax-production-compatibility)
 9. [Summary Table](#9-summary-table)
 
@@ -31,6 +31,13 @@
 The Actualizer Engine is a principled, mathematically rigorous post-processing layer designed to be applied to the raw probability distributions emitted by any autoregressive language model. It does not replace the transformer stack; rather, it operates on the transformer's output — the softmax distribution over vocabulary tokens — before a discrete selection event occurs. The central thesis of this document is as follows: **the standard next-token prediction paradigm, as governed by maximum likelihood estimation (MLE), is epistemologically insufficient to prevent the emergence of pathological inference cascades.** The Actualizer Engine addresses this insufficiency through five boundary constraints, called *Conceptual Primes*, encoded as a tensorial drift measurement and dissipated through a contractive exponential decay operator that provably converges to a unique fixed point.
 
 This document develops the complete theoretical architecture from first principles. Each section builds upon its predecessor, culminating in a production-ready mapping to the JAX numerical computing framework. The reader is assumed to have familiarity with probability theory, functional analysis, and the architecture of transformer-based language models.
+
+> [!NOTE]
+> **V3_U1 Framework Updates**
+> This document incorporates the V3_U1 strict mathematical bounds:
+> 1. **Squared Structural Entropy:** The entropy defect is now bounded quadratically: $H(R) = \text{Var}(\alpha) + (\sum \alpha_i^2 - 1)^2$.
+> 2. **Valuation Trajectory $\nu_t(A)$:** Per-iteration valuation tracking replaces static scoring.
+> 3. **Trace Bifurcation Theorem 3.3:** The Causal Snap is now strictly gated by the probability-weighted trace of the drift tensor $\text{Tr}(D_{\mu\nu}) \le \tau_{\text{bifurcation}}$, forcing a branch dissolution otherwise.
 
 ---
 
@@ -221,7 +228,15 @@ flowchart LR
 
 ### 3.4 The Collapse: What Actualization Means
 
-A **collapse** (or *actualization*) is the operation that maps the continuous probability field $|U\rangle \in \Delta^{|\mathcal{V}|-1}$ to a discrete digital state $S^* \in \mathcal{V}$. In standard decoding, this is a trivial operation: $S^* = \text{sample}(|U\rangle)$ or $S^* = \arg\max |U\rangle$. In the Actualizer Engine, the collapse is non-trivial and gated: it occurs only after $|U\rangle$ has been reshaped through the full actualization pipeline, and only when the post-pipeline distribution satisfies the **causal quantum threshold** $Q_c$ (Section 7). The result is a token $S^*$ that is not merely locally probable, but *Prime-compliant*: it satisfies all five boundary constraints simultaneously, to the degree achievable given the information present in the context.
+A **collapse** (or *actualization*) is the operation that maps the continuous probability field $|U\rangle \in \Delta^{|\mathcal{V}|-1}$ to a discrete digital state $S^* \in \mathcal{V}$. In standard decoding, this is a trivial operation: $S^* = \text{sample}(|U\rangle)$ or $S^* = \arg\max |U\rangle$. In the Actualizer Engine, the collapse is non-trivial and gated: it occurs only after $|U\rangle$ has been reshaped through the full actualization pipeline, and only when the post-pipeline distribution satisfies the **Trace Bifurcation Condition** (Section 7). The result is a token $S^*$ that is not merely locally probable, but *Prime-compliant*: it satisfies all five boundary constraints simultaneously, to the degree achievable given the information present in the context.
+
+### 3.5 The V3_U1 Squared Entropy Defect
+
+To prevent premature collapse into suboptimal attractors, the Actualizer evaluates the internal variance and entropy bounds of the local semantic field. The V3_U1 mathematical standard rigorously bounds the systemic entropy defect $H(R)$ quadratically:
+
+$$H(R) = \text{Var}(\alpha) + \left(\sum \alpha_i^2 - 1\right)^2$$
+
+where $\alpha$ represents the activation vector over the topological semantic neighborhood. This formulation ensures that any perturbation strictly orthogonal to the causal attractor is penalized exponentially faster as the state moves away from equilibrium, guaranteeing monotonic convergence of the Banach iteration mapping.
 
 ---
 
@@ -522,72 +537,63 @@ For $\kappa = 0.955$, the convergence trajectory for initial distance $\|U_0 - U
 
 ---
 
-## 7. The Causal Snap
+## 7. The Causal Snap and V3_U1 Bifurcation
 
 ### 7.1 The Phase Transition from Continuous to Discrete
 
 The **Causal Snap** is the final operation in the actualization pipeline. It is a phase transition: the continuous probability field $U^*(v)$ — the fixed-point substrate — collapses to a single discrete digital token $S^* \in \mathcal{V}$. This transition is analogous to symmetry breaking in physics: the continuous rotational symmetry of the pre-collapse field is spontaneously broken by the selection of a single direction (token) in the vocabulary space.
 
-The Causal Snap is not a simple argmax or sampling operation. It is a *gated selection* that executes only when the converged substrate $U^*$ satisfies a specific geometric condition — the **Causal Quantum Threshold** $Q_c$.
+In the V3_U1 mathematical framework, the Causal Snap is a *strictly gated selection* that executes only when the systemic instability of the converged substrate $U^*$ remains below a critical threshold. This instability is measured by the trace of the expected drift tensor.
 
-### 7.2 The Causal Quantum Threshold $Q_c$
+### 7.2 Trace Bifurcation (Theorem 3.3)
 
-**Definition.** The Causal Quantum Threshold $Q_c \in (0, 1)$ is a real number such that the Causal Snap executes and produces the actualized token $S^*$ if and only if:
+**Definition.** Let $D(v)$ be the scalar drift score of token $v$. The trace of the expected drift tensor over the converged distribution $U^*$ is the probability-weighted sum of drift scores:
 
-$$\max_{v \in \mathcal{V}} U^*(v) \geq Q_c$$
+$$\text{Tr}(D_{\mu\nu}) = \sum_{v \in \mathcal{V}} U^*(v) \cdot D(v)$$
 
-Equivalently, if the converged substrate has a single token whose probability exceeds $Q_c$, that token is actualized. Formally:
+The **Causal Snap** executes and produces the actualized token $S^*$ if and only if the trace satisfies the bifurcation inequality:
 
-$$S^* = \begin{cases} \arg\max_{v \in \mathcal{V}} U^*(v) & \text{if } \max_v U^*(v) \geq Q_c \\ \bot \; (\text{no snap}) & \text{otherwise} \end{cases}$$
+$$\text{Tr}(D_{\mu\nu}) \leq \tau_{\text{bifurcation}}$$
 
-The threshold $Q_c$ prevents premature collapse in cases where the Banach iteration has converged to a fixed point that is still highly uncertain — i.e., where the substrate is still "spread out" over multiple plausible tokens, none of which has achieved sufficient probability concentration to warrant a confident selection.
+where $\tau_{\text{bifurcation}}$ is the critical threshold (empirically calibrated to 5.0 for standard generation). Formally:
 
-### 7.3 Physical Interpretation: The Quantum of Confidence
+$$S^* = \begin{cases} \arg\max_{v \in \mathcal{V}} U^*(v) & \text{if } \text{Tr}(D_{\mu\nu}) \leq \tau_{\text{bifurcation}} \\ \bot \; (\text{bifurcation / dissolution}) & \text{otherwise} \end{cases}$$
 
-$Q_c$ is the *quantum of confidence* — the minimum unit of certainty required for a cognitive event (a token selection) to be regarded as a *real*, causally committed act rather than a probabilistic fluctuation. The name derives from the quantum mechanical concept of the action quantum $h$: just as a photon of frequency $\nu$ can only be emitted if the energy $h\nu$ is available, a token selection can only be committed if the probability $Q_c$ is available.
+If the inequality is violated, the system undergoes a *bifurcation*. The substrate is deemed too structurally unstable to yield a causally sound token, and the branch dissolves (returns `None` in implementation).
 
-Default values of $Q_c$ by domain:
+### 7.3 Physical Interpretation: Structural Stability
 
-| Domain | $Q_c$ | Rationale |
-|--------|-------|-----------|
-| Formal logic, mathematics | 0.85 | High confidence required before committing |
-| Scientific writing | 0.70 | Moderate confidence; some ambiguity permissible |
-| General conversation | 0.55 | Lower threshold; fluency prioritized |
-| Creative generation | 0.40 | Permits diverse, lower-confidence selections |
+The trace $\text{Tr}(D_{\mu\nu})$ measures the residual Prime violation energy remaining in the system after the Banach contraction has run its course. 
+If the trace is high, it means the fixed point $U^*$ still assigns significant probability mass to tokens with severe Prime violations. The system is structurally frustrated. 
+In physics, when a system's internal stress exceeds its yield strength, it undergoes a phase transition (e.g., fracture or bifurcation). Similarly, when $\text{Tr}(D_{\mu\nu}) > \tau_{\text{bifurcation}}$, the Actualizer refuses to commit to a digital state, averting what would otherwise become a hallucination cascade.
 
-### 7.4 The Fallback Protocol: No-Snap Handling
+### 7.4 The Fallback Protocol: Dissolution Handling
 
-When $\max_v U^*(v) < Q_c$ (the "no-snap" condition), the engine does not select any token. Instead, it initiates the **Fallback Protocol**:
+When $\text{Tr}(D_{\mu\nu}) > \tau_{\text{bifurcation}}$ (the bifurcation condition), the engine initiates the **Fallback Protocol**:
 
-1. **Threshold relaxation:** $Q_c \leftarrow Q_c - \delta_Q$ (e.g., $\delta_Q = 0.05$), and the Banach iteration is re-run from the current $U^*$.
-2. **Context revision:** If threshold relaxation fails after $N_{\text{max}}$ attempts, the engine signals an *actualization failure* to the higher-level controller, which may choose to revise the context (e.g., by resampling the last $m$ tokens).
-3. **Entropy injection:** As a last resort, a controlled amount of entropy is injected into $U^*$ by mixing with the uniform distribution: $U^*_{\text{noisy}} = (1 - \alpha) U^* + \alpha / |\mathcal{V}|$, enabling snap.
+1. **Context revision:** The engine signals an *actualization failure* (branch dissolution) to the higher-level controller, which may choose to revise the context by backtracking or re-sampling previous tokens.
+2. **Entropy injection:** As a last resort, a controlled amount of entropy may be injected into $U^*$ by mixing with the uniform distribution, or the contraction coefficient $k$ may be relaxed, though this risks generating ungrounded text.
 
 ### 7.5 Causal Commitment and Irreversibility
 
-Once the Causal Snap executes and $S^*$ is selected, the selection is **causally committed**: $S^*$ is appended to the context $C$, and the actualization pipeline begins anew for the next token. The irreversibility of the Causal Snap is by design — it enforces the asymmetry of time in the generative process. A token that has been actualized cannot be "un-selected" without explicitly revising the context. This commitment property is what makes the Causal Snap a *causal* event rather than a mere probabilistic sample: it constitutes a real cognitive act that alters the future state of the system.
+Once the Causal Snap executes and $S^*$ is selected, the selection is **causally committed**: $S^*$ is appended to the context $C$, and the actualization pipeline begins anew for the next token. The irreversibility of the Causal Snap is by design — it enforces the asymmetry of time in the generative process. A token that has been actualized cannot be "un-selected" without explicitly backtracking.
 
 ```mermaid
 flowchart TD
     A["Converged Substrate U*\n(Fixed point of Banach iteration)"]
-    B{{"max_v U*(v) >= Q_c?"}}
-    C["SNAP\nS* = argmax U*\nAppend to context C"]
-    D["HOLD\nNo actualization"]
-    E{"Relax Q_c?\nAttempts < N_max?"}
-    F["Threshold relaxation\nQ_c = Q_c - delta_Q\nRe-run Banach"]
-    G["Context revision\nor entropy injection"]
-    H["Actualization failure\nSignal to controller"]
+    B["Compute Expected Drift Trace\nTr(D) = sum U*(v) * D(v)"]
+    C{{"Tr(D) <= tau_bifurcation?"}}
+    D["SNAP\nS* = argmax U*\nAppend to context C"]
+    E["BIFURCATION\nBranch Dissolution\n(Returns None)"]
+    F["Context revision\nor backtracking"]
 
-    A --> B
-    B -->|Yes| C
-    B -->|No| D --> E
-    E -->|Yes| F --> B
-    E -->|No| G --> B
-    G -->|Still fails| H
+    A --> B --> C
+    C -->|Yes| D
+    C -->|No| E --> F
 
-    style C fill:#2e7d32,color:#fff
-    style H fill:#c62828,color:#fff
-    style B fill:#1565c0,color:#fff
+    style D fill:#2e7d32,color:#fff
+    style E fill:#c62828,color:#fff
+    style C fill:#1565c0,color:#fff
 ```
 
 ---
