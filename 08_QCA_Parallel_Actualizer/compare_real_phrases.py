@@ -43,13 +43,13 @@ import os
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-_PKG = os.path.join(_HERE, "..", "..", "Code", "ckt_actualizer_engine", "src")
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
+_CORE = os.path.join(_HERE, "..", "02_Core_Engine")
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
 
-from ckt_actualizer.core.diept   import DIEPTState, QuestionOperatorParser
-from ckt_actualizer.core.filters import EpistemicVerificationSuite
-from ckt_actualizer.models.thought import CandidateThought
+from diept   import DIEPTState, QuestionOperatorParser
+from filters import EpistemicVerificationSuite
+from thought import CandidateThought
 
 from qca                 import QuenchClusterAlgorithm, QCANode, QCACluster
 from parallel_actualizer import ParallelActualizer, ClusterActualizer

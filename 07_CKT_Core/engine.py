@@ -16,7 +16,7 @@ with the full CKT Cognitive Life Cycle:
 Architecture
 ------------
   UpgradedActualizerEngine wraps ActualizerEngine from 02_Core_Engine:
-    - steer_next_token()  delegates the Banach contraction loop to
+    - steer_next_token() delegates the Banach contraction loop to
       ActualizerEngine.steer() — no duplication of drift/vacuum/contraction logic.
     - Pre-inference FDSA pruning is delegated to VectorizedFDSAPruner (fdsa.py).
     - Crystallization logic (CAKI, MCE construction) is CKT-exclusive.
@@ -66,6 +66,7 @@ class UpgradedActualizerEngine:
     k_contractive      : float  — Default Banach contraction constant. Default 0.45.
     Q_c                : float  — L2 convergence threshold. Default 1e-5.
     tau                : float  — Vacuum Brake decay temperature. Default 1.0.
+    tau_bifurcation   : float  — Bifurcation threshold for Tr(D_μν) ≤ τ criterion. Default 5.0.
     theta_target       : float  — DIEPT Mercy threshold (radians). Default 0.70.
     caki_threshold     : float  — CAKI gate for crystallization. Default 0.80.
     delta_finite       : float  — Theorem 7 boundary gap. Default 0.5.
@@ -78,6 +79,7 @@ class UpgradedActualizerEngine:
         k_contractive: float = 0.45,
         Q_c: float = 1e-5,
         tau: float = 1.0,
+        tau_bifurcation: float = 5.0,
         theta_target: float = 0.70,
         caki_threshold: float = 0.80,
         delta_finite: float = 0.5,
@@ -89,9 +91,10 @@ class UpgradedActualizerEngine:
         # Canonical Banach contraction engine (02_Core_Engine)
         self._base_engine = ActualizerEngine(
             vocab_size=vocab_size,
-            k=k_contractive,
+            mercy_k=k_contractive,
             Q_c=Q_c,
             tau=tau,
+            tau_bifurcation=tau_bifurcation,
         )
 
         # CKT-exclusive components
@@ -127,14 +130,17 @@ class UpgradedActualizerEngine:
         )
 
         # Phase 2+3: Full Banach contraction loop — delegated to canonical engine.
-        # The base engine uses the anchor domain's k via its own internal k.
-        # We temporarily override k with the anchor domain's k for this step.
-        saved_k = self._base_engine.k
+        # The base engine uses the anchor domain's k via its mercy_k property.
+        saved_mercy_k = self._base_engine.mercy_k
+        self._base_engine.mercy_k = anchor_domain.k
         self._base_engine.k = anchor_domain.k
-        selected_token, U_final, final_drift, iterations = self._base_engine.steer(
+        
+        selected_token, U_final, final_drift, iterations, nu_history, actualized = self._base_engine.steer(
             pruned_logits, history, target_tokens
         )
-        self._base_engine.k = saved_k
+        
+        self._base_engine.mercy_k = saved_mercy_k
+        self._base_engine.k = saved_mercy_k
 
         return selected_token, U_final, final_drift, iterations, anchor_domain, similarity
 

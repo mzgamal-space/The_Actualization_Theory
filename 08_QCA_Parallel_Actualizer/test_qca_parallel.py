@@ -27,9 +27,9 @@ import random
 # ---------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
-_PKG = os.path.join(_HERE, "..", "..", "Code", "ckt_actualizer_engine", "src")
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
+_CORE = os.path.join(_HERE, "..", "02_Core_Engine")
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
 
 from qca                 import QuenchClusterAlgorithm, QCANode, QuenchResult
 from parallel_actualizer import ParallelActualizer, ClusterActualizerResult

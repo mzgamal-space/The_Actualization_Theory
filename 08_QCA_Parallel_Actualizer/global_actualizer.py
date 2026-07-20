@@ -40,15 +40,17 @@ from typing import Dict, List, Optional, Set, Tuple
 # Path bootstrap
 # ---------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_PKG  = os.path.join(_HERE, "..", "..", "Code", "ckt_actualizer_engine", "src")
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
+_CORE = os.path.join(_HERE, "..", "02_Core_Engine")
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
 
-from ckt_actualizer.models.mce     import MCE, ReferenceDomain
-from ckt_actualizer.models.thought  import CandidateThought
-from ckt_actualizer.core.fdsa      import FractalDeductionSearch, VectorizedFDSAPruner, DEFAULT_LIBRARY
-from ckt_actualizer.core.filters   import EpistemicVerificationSuite
-from ckt_actualizer.core.diept     import DIEPTState
+from mce     import MCE
+from thought  import CandidateThought
+from filters   import EpistemicVerificationSuite
+from diept     import DIEPTState
+
+from actualizer_engine import ActualizerEngine
+from fdsa_pruner       import FractalDeductionSearch, VectorizedFDSAPruner, DEFAULT_LIBRARY, ReferenceDomain
 
 from parallel_actualizer import ClusterActualizerResult
 
@@ -149,63 +151,6 @@ class GlobalActualizer:
     # to keep modules fully self-contained and independently testable)
     # ------------------------------------------------------------------
 
-    def _softmax(self, logits: List[float]) -> List[float]:
-        valid = [(i, x) for i, x in enumerate(logits) if x != -math.inf]
-        if not valid:
-            return [0.0] * self.V
-        max_l = max(x for _, x in valid)
-        exps  = [(i, math.exp(x - max_l)) for i, x in valid]
-        total = sum(e for _, e in exps) or 1.0
-        probs = [0.0] * self.V
-        for i, e in exps:
-            probs[i] = e / total
-        return probs
-
-    def _drift(
-        self,
-        U:             List[float],
-        history:       List[int],
-        target_tokens: Set[int],
-    ) -> List[float]:
-        w_L, w_G, w_F = 0.35, 0.35, 0.20
-        D = [0.0] * self.V
-        for step_back, tok in enumerate(reversed(history[-8:])):
-            if 0 <= tok < self.V:
-                D[tok] += w_L * 2.0 * math.exp(-0.4 * step_back)
-        for v in range(self.V):
-            if U[v] == 0.0:
-                continue
-            if v not in target_tokens:
-                D[v] += w_G * 1.5
-            D[v] += w_F * (-math.log(max(U[v], 1e-12)) * 0.08)
-        return D
-
-    def _vacuum_brake(self, U: List[float], D: List[float]) -> List[float]:
-        decay  = [math.exp(-d / self.tau) for d in D]
-        braked = [U[i] * decay[i] for i in range(self.V)]
-        total  = sum(braked) or 1.0
-        return [x / total for x in braked]
-
-    def _steer_token(
-        self,
-        pruned_logits: List[float],
-        history:       List[int],
-        target_tokens: Set[int],
-        k_step:        float,
-    ) -> Tuple[int, List[float], int]:
-        U = self._softmax(pruned_logits)
-        for iteration in range(1, self.max_iterations + 1):
-            U_prev = U[:]
-            D_vec  = self._drift(U, history, target_tokens)
-            U_b    = self._vacuum_brake(U, D_vec)
-            U      = [k_step * U_b[v] + (1.0 - k_step) * U_prev[v]
-                      for v in range(self.V)]
-            delta  = math.sqrt(sum((U[v] - U_prev[v]) ** 2 for v in range(self.V)))
-            if delta <= self.Q_c:
-                break
-        selected = max(range(self.V), key=lambda v: U[v])
-        return selected, U, iteration
-
     def _caki(
         self,
         chain: List[int],
@@ -265,10 +210,13 @@ class GlobalActualizer:
         )
 
         # --- Build global FDSA library: defaults + all cluster MCEs ---
-        fdsa   = FractalDeductionSearch(list(DEFAULT_LIBRARY))
-        for mce in cluster_mces:
-            fdsa.add_reference_domain(mce)
-        pruner   = VectorizedFDSAPruner(self.V, fdsa)
+        # Initialize FDSA directly with combined library
+        fdsa = FractalDeductionSearch(list(DEFAULT_LIBRARY) + cluster_mces)
+        
+        # Initialize pruner and inject the updated fdsa engine
+        pruner = VectorizedFDSAPruner(self.V)
+        pruner.fdsa = fdsa
+
         verifier = EpistemicVerificationSuite(
             cwf_penalty_matrix=self._cwf,
             theta_target=self._theta_target,
@@ -314,22 +262,31 @@ class GlobalActualizer:
 
         # --- Banach steer: extend global chain n_steps further ---
         total_iters = 0
+
+        engine = ActualizerEngine(
+            vocab_size=self.V,
+            mercy_k=k_step,
+            Q_c=self.Q_c,
+            tau=self.tau,
+            max_iters=self.max_iterations,
+        )
+
         for step in range(self.n_steps):
             logits            = [1.0] * self.V
-            pruned, active, _, _ = pruner.prune_vocabulary(
+            pruned, active = pruner.prune_vocabulary(
                 logits,
                 global_chain[-1] if global_chain else -1,
                 {},
                 "general",
             )
-            token, U, iters = self._steer_token(
-                pruned, global_chain, target_tokens, k_step
+            token, U, Tr_D, iters, nu_hist, actualized = engine.steer(
+                pruned, global_chain, target_tokens
             )
             global_chain.append(token)
             total_iters += iters
             log.append(
                 f"[Global Actualizer] Step {step+1}: token={token}, "
-                f"iters={iters}, active_vocab={active}"
+                f"iters={iters}, active_vocab={active}, Tr_D={Tr_D:.4f}, actualized={actualized}"
             )
 
         # --- Build CandidateThought ---

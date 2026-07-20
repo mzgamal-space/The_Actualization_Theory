@@ -40,15 +40,15 @@ from typing import Dict, List, Optional, Set, Tuple
 # directly, pointing to the installable ckt_actualizer package.
 # ---------------------------------------------------------------------------
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_PKG  = os.path.join(_HERE, "..", "..", "Code", "ckt_actualizer_engine", "src")
-if _PKG not in sys.path:
-    sys.path.insert(0, _PKG)
+_CORE  = os.path.join(_HERE, "..", "02_Core_Engine")
+if _CORE not in sys.path:
+    sys.path.insert(0, _CORE)
 
-from ckt_actualizer.models.mce    import MCE, ReferenceDomain
-from ckt_actualizer.models.thought import CandidateThought
-from ckt_actualizer.core.fdsa     import FractalDeductionSearch, VectorizedFDSAPruner, DEFAULT_LIBRARY
-from ckt_actualizer.core.filters  import EpistemicVerificationSuite
-from ckt_actualizer.core.diept    import DIEPTState
+from mce    import MCE
+from thought import CandidateThought
+from filters  import EpistemicVerificationSuite
+from diept    import DIEPTState
+from fdsa_pruner import FractalDeductionSearch, VectorizedFDSAPruner, DEFAULT_LIBRARY, ReferenceDomain
 
 from qca import QCACluster
 
@@ -305,7 +305,7 @@ class ClusterActualizer:
 
         for step in range(n_steps):
             logits            = [1.0] * self.V          # uniform prior
-            pruned, active, anchor_step, sim_step = pruner.prune_vocabulary(
+            pruned, active = pruner.prune_vocabulary(
                 logits,
                 chain[-1] if chain else -1,
                 {},
@@ -398,7 +398,7 @@ class ClusterActualizer:
                     f"({len(cluster.nodes)} nodes). CAKI={caki:.4f}."
                 ),
             )
-            fdsa.add_reference_domain(mce)
+            fdsa.library.append(mce)
             log.append(
                 f"[Cluster {cid}] ✓ Crystallized → {mce}"
             )
