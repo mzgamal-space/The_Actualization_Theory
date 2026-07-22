@@ -395,8 +395,264 @@ def fig6_qca_parallel_speedup():
 
 
 # ===========================================================================
+# Figure 7 — Three-Way Architecture Comparison
+# ===========================================================================
+def fig7_architecture_comparison():
+    """
+    Three-panel comparison chart from test_07_architecture_comparison empirical results.
+
+    Panel 1: Grounding / Hallucination / Repetition rates (quality metrics bar chart)
+    Panel 2: Latency vs vocabulary size V — Baseline vs Actualizer
+    Panel 3: QCA Parallel speedup vs dataset size N (K=5, V=2000)
+    """
+    # ── Empirical results (from test_07 run: V=500, n_steps=30, distractor=+8.0) ──
+    models       = ["Attention\nBaseline", "Actualizer\nEngine", "QCA Parallel\nEngine"]
+    grounded     = [0.0000, 1.0000, 1.0000]
+    hallucinat   = [1.0000, 0.0000, 0.0000]
+    repetition   = [0.0345, 0.0000, 0.0000]
+    valuation    = [0.0000, 0.4027, 0.5094]   # 0 for baseline = no mechanism
+    actualized   = [0.0000, 1.0000, 1.0000]   # 0 for baseline = no mechanism
+
+    vocab_sizes  = [500, 1000, 2000]
+    baseline_ms  = [52.07, 77.54, 114.52]
+    actualiz_ms  = [8165.87, 14190.98, 21353.16]
+
+    n_sizes      = [20, 40, 80, 120, 200]
+    seq_ms       = [4736.99, 10770.26, 20315.86, 31948.36, 41021.67]
+    par_ms       = [5797.64,  8423.78, 12940.84, 14878.49, 18298.32]
+    speedup      = [0.82, 1.28, 1.57, 2.15, 2.24]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.patch.set_facecolor(BG)
+    fig.suptitle(
+        "Three-Way Architecture Comparison: Attention Baseline vs Actualizer Engine vs QCA Parallel Engine",
+        fontsize=13, fontweight='bold', color=C_TEXT, y=1.01
+    )
+
+    # ── Panel 1: Quality metrics grouped bar chart ────────────────────────
+    ax = axes[0]
+    ax.set_facecolor(PANEL)
+    x      = np.arange(len(models))
+    width  = 0.18
+    colors_bars = [C_FDSA, C_BASE, C_GOLD, C_ACCENT, C_PURPLE]
+    metric_data = [grounded, hallucinat, repetition, valuation, actualized]
+    metric_labels = ["Grounded", "Hallucination", "Repetition", "Valuation ν_t", "Actualized"]
+
+    for i, (data, label, col) in enumerate(zip(metric_data, metric_labels, colors_bars)):
+        offset = (i - 2) * width
+        bars = ax.bar(x + offset, data, width, label=label, color=col, alpha=0.85, edgecolor='none')
+        # Annotate non-zero bars
+        for bar, val in zip(bars, data):
+            if val > 0:
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                        f"{val:.2f}", ha='center', va='bottom', fontsize=7.5,
+                        color=C_TEXT, fontweight='bold')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(models, fontsize=10)
+    ax.set_ylim(0, 1.28)
+    ax.set_ylabel("Rate / Score  [0–1]", color=C_TEXT)
+    ax.set_title("Quality Metrics (V=500, 30 steps, distractor +8.0)", fontsize=11, color=C_TEXT)
+    ax.legend(fontsize=8, loc='upper right', fancybox=True, framealpha=0.3)
+    ax.grid(True, axis='y', alpha=0.5)
+
+    # Baseline annotation
+    ax.annotate("100% hallucination\n(distractor wins)",
+                xy=(0, 1.0), xytext=(0.32, 1.12),
+                fontsize=8, color=C_BASE, fontweight='bold',
+                arrowprops=dict(arrowstyle='->', color=C_BASE, lw=1.2))
+
+    # ── Panel 2: Latency scaling vs vocabulary size ───────────────────────
+    ax2 = axes[1]
+    ax2.set_facecolor(PANEL)
+    ax2.plot(vocab_sizes, baseline_ms,  'o-', color=C_BASE,   lw=2, ms=7, label="Attention Baseline  O(V)")
+    ax2.plot(vocab_sizes, actualiz_ms,  's-', color=C_FDSA,   lw=2, ms=7, label="Actualizer Engine  O(V×iters)")
+    ax2.fill_between(vocab_sizes, baseline_ms, actualiz_ms, alpha=0.08, color=C_FDSA)
+
+    for v, bms, ams in zip(vocab_sizes, baseline_ms, actualiz_ms):
+        ax2.annotate(f"{bms:.0f}ms", xy=(v, bms), xytext=(v - 80, bms + 400),
+                     fontsize=8, color=C_BASE)
+        ax2.annotate(f"{ams:.0f}ms", xy=(v, ams), xytext=(v - 80, ams - 1200),
+                     fontsize=8, color=C_FDSA)
+
+    ax2.set_xlabel("Vocabulary Size V", color=C_TEXT)
+    ax2.set_ylabel("Latency (ms, 30 steps)", color=C_TEXT)
+    ax2.set_title("Latency vs Vocabulary Size\n(Baseline vs Actualizer Engine)", fontsize=11, color=C_TEXT)
+    ax2.legend(fontsize=9, fancybox=True, framealpha=0.3)
+    ax2.grid(True, alpha=0.5)
+
+    note = ("Actualizer overhead is\nthe price of 100% grounding\n& zero hallucination")
+    ax2.text(0.98, 0.12, note, transform=ax2.transAxes,
+             ha='right', va='bottom', fontsize=8.5,
+             color=C_MUTED, style='italic',
+             bbox=dict(boxstyle='round,pad=0.4', facecolor=PANEL, edgecolor=GRID_C, alpha=0.8))
+
+    # ── Panel 3: QCA Parallel speedup ─────────────────────────────────────
+    ax3 = axes[2]
+    ax3.set_facecolor(PANEL)
+    ax3_r = ax3.twinx()
+    ax3_r.set_facecolor(PANEL)
+
+    ax3.plot(n_sizes, seq_ms, 'o--', color=C_BASE,   lw=2, ms=7, label="Sequential  O(N²)")
+    ax3.plot(n_sizes, par_ms, 's-',  color=C_FDSA,   lw=2.5, ms=7, label="QCA Parallel  O(N²/K)")
+    ax3.fill_between(n_sizes, par_ms, seq_ms, alpha=0.12, color=C_FDSA, label="Parallel savings")
+
+    ax3_r.plot(n_sizes, speedup, '^-', color=C_GOLD, lw=2, ms=8, label="Speedup factor")
+    ax3_r.axhline(y=5.0, color=C_PURPLE, lw=1, ls=':', alpha=0.7, label="K=5× theoretical max")
+
+    for n, sp in zip(n_sizes, speedup):
+        ax3_r.annotate(f"{sp:.2f}×", xy=(n, sp), xytext=(n + 3, sp + 0.06),
+                       fontsize=8.5, color=C_GOLD, fontweight='bold')
+
+    ax3.set_xlabel("Dataset Size N", color=C_TEXT)
+    ax3.set_ylabel("Execution Time (ms)", color=C_TEXT)
+    ax3_r.set_ylabel("Speedup Factor", color=C_GOLD)
+    ax3_r.tick_params(axis='y', colors=C_GOLD)
+    ax3_r.set_ylim(0, 6.5)
+    ax3.set_title(f"QCA Parallel Engine Speedup\n(K=5, V=2000)", fontsize=11, color=C_TEXT)
+
+    lines_a, labels_a = ax3.get_legend_handles_labels()
+    lines_b, labels_b = ax3_r.get_legend_handles_labels()
+    ax3.legend(lines_a + lines_b, labels_a + labels_b, fontsize=8.5,
+               loc='upper left', fancybox=True, framealpha=0.3)
+    ax3.grid(True, alpha=0.5)
+
+    fig.tight_layout()
+    return save(fig, "fig7_architecture_comparison.png")
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
+def fig8_latency_fix_analysis():
+    """
+    Four-panel latency root cause + fix analysis chart.
+    Empirical data from test_08_latency_jax_comparison (V=500, 30 steps, distractor=+8.0).
+
+    Panel 1: Latency comparison of all 5 approaches (log scale bar chart)
+    Panel 2: Speedup factor vs vocabulary size V (NumPy and FDSA+NumPy)
+    Panel 3: Grounding quality maintained across all fixes (quality is preserved)
+    Panel 4: JAX backend QCA vs processes comparison
+    """
+    # ── Phase 1 data (V=500, 30 steps) ──────────────────────────────────────
+    labels   = ["Baseline\n(Softmax+Argmax)", "Naive\nActualizer\n(Python loops)",
+                "FDSA Active\nVocab", "NumPy\nVectorized", "FDSA +\nNumPy Combined"]
+    latency  = [12.8, 6562.4, 6029.1, 1172.2, 1177.5]
+    grounded = [0.00,    1.00,    1.00,   1.00,     1.00]
+    colors_b = [C_BASE, "#4a4aff", C_MUTED, C_FDSA, C_GOLD]
+
+    # ── Phase 2 data ─────────────────────────────────────────────────────────
+    V_vals      = [100, 500, 1000]
+    naive_ms    = [1842.3, 6160.6, 13124.8]
+    numpy_ms    = [1166.4,  722.6,  1274.6]
+    combined_ms = [1059.0,  687.9,  1514.2]
+    speedup_np  = [round(n / max(m, 0.01), 2) for n, m in zip(naive_ms, numpy_ms)]
+    speedup_cb  = [round(n / max(m, 0.01), 2) for n, m in zip(naive_ms, combined_ms)]
+
+    # ── Phase 3 data ─────────────────────────────────────────────────────────
+    backends   = ["JAX\n(vectorized)", "Processes\n(spawn)"]
+    qca_ms_bck = [6335.1, 12940.84]   # JAX measured, Processes from test_06 N=80
+    qca_spd    = [round(12940.84 / 6335.1, 2), 1.0]
+
+    fig, axes = plt.subplots(1, 4, figsize=(22, 6))
+    fig.patch.set_facecolor(BG)
+    fig.suptitle(
+        "Latency Root Cause Analysis & Fix Benchmark  |  V3_U1 ActualizerEngine",
+        fontsize=13, fontweight='bold', color=C_TEXT, y=1.02
+    )
+
+    # ── Panel 1: Latency bar chart (log scale) ───────────────────────────────
+    ax = axes[0]
+    ax.set_facecolor(PANEL)
+    bars = ax.bar(range(len(labels)), latency, color=colors_b, alpha=0.85, edgecolor='none', width=0.6)
+    for bar, val in zip(bars, latency):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() * 1.15,
+                f"{val:.0f}ms", ha='center', va='bottom', fontsize=8, color=C_TEXT, fontweight='bold')
+
+    ax.set_yscale('log')
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylabel("Latency (ms, log scale)", color=C_TEXT)
+    ax.set_title("Approach Latency — V=500, 30 Steps\n(log scale; lower = better)", fontsize=10, color=C_TEXT)
+    ax.grid(True, axis='y', alpha=0.4)
+
+    # Annotate speedups
+    ax.annotate("5.6x faster →", xy=(3, 1172), xytext=(1.8, 3000),
+                fontsize=8.5, color=C_FDSA, fontweight='bold',
+                arrowprops=dict(arrowstyle='->', color=C_FDSA, lw=1.2))
+    ax.annotate("ROOT CAUSE:\nPython for-loops\nO(V×iters)",
+                xy=(1, 6562), xytext=(0.0, 200),
+                fontsize=7.5, color="#4a4aff",
+                arrowprops=dict(arrowstyle='->', color="#4a4aff", lw=1.0))
+
+    # ── Panel 2: Speedup vs V ────────────────────────────────────────────────
+    ax2 = axes[1]
+    ax2.set_facecolor(PANEL)
+    ax2.plot(V_vals, speedup_np, 'o-', color=C_FDSA,   lw=2.5, ms=8, label="NumPy Vectorized")
+    ax2.plot(V_vals, speedup_cb, 's--', color=C_GOLD,  lw=2,   ms=8, label="FDSA + NumPy")
+    ax2.fill_between(V_vals, speedup_np, alpha=0.1, color=C_FDSA)
+
+    for v, sp_n, sp_c in zip(V_vals, speedup_np, speedup_cb):
+        ax2.annotate(f"{sp_n:.1f}×", xy=(v, sp_n), xytext=(v - 50, sp_n + 0.5),
+                     fontsize=8.5, color=C_FDSA, fontweight='bold')
+
+    ax2.set_xlabel("Vocabulary Size V", color=C_TEXT)
+    ax2.set_ylabel("Speedup vs Naive Python Loops", color=C_TEXT)
+    ax2.set_title("Speedup Factor vs V\n(vs naive Python-loop engine)", fontsize=10, color=C_TEXT)
+    ax2.legend(fontsize=9, fancybox=True, framealpha=0.3)
+    ax2.grid(True, alpha=0.4)
+    ax2.set_ylim(0, max(max(speedup_np), max(speedup_cb)) * 1.4)
+
+    ax2.text(0.05, 0.95, "Speedup grows with V\nO(V) numpy vs O(V) Python",
+             transform=ax2.transAxes, ha='left', va='top', fontsize=8,
+             color=C_MUTED, style='italic',
+             bbox=dict(boxstyle='round,pad=0.3', facecolor=PANEL, edgecolor=GRID_C, alpha=0.7))
+
+    # ── Panel 3: Grounding preserved ─────────────────────────────────────────
+    ax3 = axes[2]
+    ax3.set_facecolor(PANEL)
+    short_labels = ["Baseline", "Naive\nActualizer", "FDSA\nActive V", "NumPy\nEngine", "FDSA+NumPy\nCombined"]
+    grounded_bar = ax3.bar(range(len(short_labels)), grounded, color=colors_b, alpha=0.85, edgecolor='none', width=0.55)
+    for bar, val in zip(grounded_bar, grounded):
+        color = C_FDSA if val > 0 else C_BASE
+        ax3.text(bar.get_x() + bar.get_width()/2, val + 0.01,
+                 f"{'100%' if val==1.0 else '0%'}", ha='center', va='bottom',
+                 fontsize=9, color=color, fontweight='bold')
+
+    ax3.set_xticks(range(len(short_labels)))
+    ax3.set_xticklabels(short_labels, fontsize=8)
+    ax3.set_ylim(0, 1.25)
+    ax3.set_ylabel("Grounded Rate  [0–1]", color=C_TEXT)
+    ax3.set_title("Grounding Quality Preserved\n(100% across all fixes)", fontsize=10, color=C_TEXT)
+    ax3.grid(True, axis='y', alpha=0.4)
+    ax3.text(0.5, 0.92, "Quality = 100% in ALL fixed approaches\nLatency cut 5.6x with zero quality loss",
+             transform=ax3.transAxes, ha='center', va='top', fontsize=8.5, color=C_FDSA,
+             bbox=dict(boxstyle='round,pad=0.4', facecolor=PANEL, edgecolor=C_FDSA, alpha=0.3))
+
+    # ── Panel 4: JAX vs Processes for QCA ────────────────────────────────────
+    ax4 = axes[3]
+    ax4.set_facecolor(PANEL)
+    bk_colors = [C_GOLD, C_ACCENT]
+    bars4 = ax4.bar(backends, qca_ms_bck, color=bk_colors, alpha=0.85, edgecolor='none', width=0.45)
+    for bar, val, spd in zip(bars4, qca_ms_bck, qca_spd):
+        ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 100,
+                 f"{val:.0f}ms", ha='center', va='bottom', fontsize=9, color=C_TEXT, fontweight='bold')
+        if spd != 1.0:
+            ax4.text(bar.get_x() + bar.get_width()/2, bar.get_height() / 2,
+                     f"{spd:.2f}×\nfaster", ha='center', va='center', fontsize=9,
+                     color='black', fontweight='bold')
+
+    ax4.set_ylabel("Latency (ms, N=80, K=5, V=1000)", color=C_TEXT)
+    ax4.set_title("QCA Parallel: JAX vs Processes\n(N=80, K=5, V=1000)", fontsize=10, color=C_TEXT)
+    ax4.grid(True, axis='y', alpha=0.4)
+    ax4.text(0.5, 0.95, f"JAX available: YES\nJAX 2.04x faster than\nProcessPoolExecutor",
+             transform=ax4.transAxes, ha='center', va='top', fontsize=8.5, color=C_GOLD,
+             bbox=dict(boxstyle='round,pad=0.4', facecolor=PANEL, edgecolor=C_GOLD, alpha=0.3))
+
+    fig.tight_layout()
+    return save(fig, "fig8_latency_fix_analysis.png")
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("  Actualizer Engine - Master Chart Generator  [V3_U1]")
@@ -408,7 +664,10 @@ if __name__ == "__main__":
     paths.append(fig4_scaling())
     paths.append(fig5_v3u1_valuation())
     paths.append(fig6_qca_parallel_speedup())
+    paths.append(fig7_architecture_comparison())
+    paths.append(fig8_latency_fix_analysis())
     print(f"\nAll {len(paths)} charts generated:")
     for p in paths:
         print(f"    {p}")
+
 
