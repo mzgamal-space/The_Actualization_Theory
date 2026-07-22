@@ -67,7 +67,7 @@ def save(fig, fname):
 def fig1_hallucination():
     print("\n[Fig 1] Running hallucination test...")
     import test_01_hallucination as t1
-    r = t1.run(vocab_size=500, steps=30)
+    r = t1.run(vocab_size=1000, steps=30)
     steps    = r["steps"]
     base_cum = [sum(r["base_grounded"][:i+1])/(i+1)*100 for i in range(len(steps))]
     fdsa_cum = [sum(r["fdsa_grounded"][:i+1])/(i+1)*100 for i in range(len(steps))]
@@ -343,6 +343,58 @@ def fig5_v3u1_valuation():
 
 
 # ===========================================================================
+# Figure 6 - QCA Parallel Engine Speedup
+# ===========================================================================
+def fig6_qca_parallel_speedup():
+    print("\n[Fig 6] Running QCA Parallel Engine benchmark...")
+    import test_06_qca_parallel_engine as t6
+    r = t6.run(n_sizes=(20, 40, 80, 120, 200), K=5, vocab_size=1000)
+    n_sizes = r["n_sizes"]
+    t_seq   = r["sequential_ms"]
+    t_par   = r["parallel_ms"]
+    speedup = r["speedup"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    fig.suptitle(f"Figure 6 - QCA Parallel Engine Acceleration (K={r['K']} Clusters, V={r['vocab_size']})",
+                 fontsize=15, fontweight='bold', y=1.01)
+
+    # ── Panel 1: Execution Time Comparison ──
+    ax = axes[0]
+    ax.plot(n_sizes, t_seq, marker='o', color=C_BASE,   lw=2.5, label="Sequential Baseline O(N²)")
+    ax.plot(n_sizes, t_par, marker='s', color=C_FDSA,   lw=2.5, label=f"QCA Parallel Engine O(N²/{r['K']})")
+    ax.fill_between(n_sizes, t_par, t_seq, color=C_FDSA, alpha=0.15, label="Time Saved by QCA Partitioning")
+
+    # Stacked breakdown bars for parallel execution
+    qca_t   = r["qca_ms"]
+    worker_t = r["parallel_worker_ms"]
+    synth_t = r["synthesis_ms"]
+    
+    ax.set_title("Execution Latency vs Problem Size (N)")
+    ax.set_xlabel("Dataset Size N (Number of Nodes)")
+    ax.set_ylabel("Execution Time (ms)")
+    ax.legend(fontsize=10); ax.grid(True)
+
+    # ── Panel 2: Speedup Factor ──
+    ax = axes[1]
+    bars = ax.bar([str(n) for n in n_sizes], speedup, color=C_ACCENT, alpha=0.85, width=0.5)
+    ax.axhline(1.0, color=C_MUTED, lw=1.5, ls='--', label="Baseline 1.0×")
+    ax.axhline(float(r['K']), color=C_GOLD, lw=2.0, ls=':', label=f"Theoretical Upper Bound (K={r['K']}×)")
+
+    for bar, s in zip(bars, speedup):
+        ax.text(bar.get_x() + bar.get_width()/2.0, bar.get_height() + 0.05,
+                f"{s:.2f}×", ha='center', va='bottom', fontsize=10, color=C_TEXT, fontweight='bold')
+
+    ax.set_title(f"Empirical Parallel Speedup (Factor-K={r['K']} Baseline)")
+    ax.set_xlabel("Dataset Size N (Number of Nodes)")
+    ax.set_ylabel("Speedup Factor (Sequential / Parallel)")
+    ax.set_ylim(0, max(speedup) * 1.35 if speedup else 5.0)
+    ax.legend(fontsize=10); ax.grid(True, axis='y')
+
+    fig.tight_layout()
+    return save(fig, "fig6_qca_parallel_speedup.png")
+
+
+# ===========================================================================
 # Main
 # ===========================================================================
 if __name__ == "__main__":
@@ -355,6 +407,8 @@ if __name__ == "__main__":
     paths.append(fig3_speed())
     paths.append(fig4_scaling())
     paths.append(fig5_v3u1_valuation())
+    paths.append(fig6_qca_parallel_speedup())
     print(f"\nAll {len(paths)} charts generated:")
     for p in paths:
         print(f"    {p}")
+

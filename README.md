@@ -5,7 +5,7 @@
 
 > **Document Classification:** Theoretical Foundations — Series I  
 > **Series:** Consciousness and Prime Base Intelligence Framework  
-> **Version:** 2.0.0  
+> **Version:** 3.0.0  
 > **Date:** July 2026  
 > **Status:** Canonical Reference
 > **DOI: https://doi.org/10.5281/zenodo.21420098**
@@ -16,6 +16,7 @@
 * **DOI Update:** Upgraded to Zenodo DOI 21420098.
 * **Squared Entropy Defect:** Replaced static probability bounds with the V3_U1 quadratic structural entropy defect formula $H(R) = \text{Var}(\alpha) + (\sum \alpha_i^2 - 1)^2$.
 * **Trace Bifurcation (Theorem 3.3):** The Causal Snap is now strictly gated by the probability-weighted trace of the expected drift tensor ($\text{Tr}(D_{\mu\nu}) \le 5.0$), removing the legacy $Q_c$ threshold.
+* **QCA Parallel Engine Integration:** Incorporated the Quench-Cluster Algorithm (QCA) front-end, multi-backend parallel steering (`processes`, `jax`, `auto`), and $O(N^2/K)$ theoretical complexity scaling.
 
 ---
 
@@ -29,7 +30,8 @@
 6. [Banach Fixed-Point Contractive Mapping](#6-banach-fixed-point-contractive-mapping)
 7. [The Causal Snap](#7-the-causal-snap)
 8. [JAX Production Compatibility](#8-jax-production-compatibility)
-9. [Summary Table](#9-summary-table)
+9. [The QCA Parallel Engine Architecture](#9-the-qca-parallel-engine-architecture)
+10. [Summary Table](#10-summary-table)y-table)
 
 ---
 
@@ -709,9 +711,122 @@ Because all operations in the actualization pipeline are differentiable with res
 
 ---
 
-## 9. Summary Table
+## 9. The QCA Parallel Engine Architecture
 
-The following table provides a complete, single-view mapping of every phase of the Actualizer Engine to its mathematical operator, corresponding Conceptual Prime(s), and JAX/Python implementation.
+### 9.1 Theoretical Complexity & Mathematical Foundation
+
+The **QCA Parallel Engine** implements the clustered parallel actualization theory articulated in *CKT White Paper v3, §7.2 (Theorem 2 Corollary)*. Rather than processing a large, high-dimensional problem space of $N$ nodes sequentially at quadratic computational cost $O(N^2)$, the QCA front-end crystallizes the dataset into $K$ independent sub-problems (clusters) of size $N/K$.
+
+Each cluster is then solved independently in parallel at cost $O((N/K)^2)$. The aggregate computational work required for full actualization across all $K$ parallel clusters is:
+
+$$\text{Work}_{\text{parallel}} = K \cdot O\!\left(\left(\frac{N}{K}\right)^2\right) = O\!\left(\frac{N^2}{K}\right)$$
+
+This represents an exact **factor-$K$ computational complexity reduction** compared to sequential processing. For a problem set of $N = 200$ nodes partitioned into $K = 5$ clusters:
+
+$$\text{Complexity}_{\text{sequential}} = O(200^2) = 40{,}000 \text{ ops} \quad \xrightarrow{\text{QCA Parallel}} \quad \text{Complexity}_{\text{parallel}} = O\left(\frac{200^2}{5}\right) = 8{,}000 \text{ ops} \quad (5.0\times \text{ theoretical reduction})$$
+
+### 9.2 Phase 1: QCA Crystallization Front-End
+
+The crystallization phase is governed by the **Quench-Cluster Algorithm (QCA)** using the canonical Random Geometric Graph (RGG) derived Quench Temperature ($T_q^{\text{RGG}}$):
+
+$$T_q^{\text{RGG}} = \gamma \cdot \sqrt{\frac{A \cdot \ln(N/K)}{\pi \cdot N}}$$
+
+where:
+- $N$ is the total number of problem nodes in the spatial/embedding domain.
+- $K$ is the target number of crystallization clusters.
+- $A$ is the domain bounding-box area (default $1.0$).
+- $\gamma$ is the RGG coupling constant (default $1.0$).
+
+#### Two-Step Crystallization Algorithm:
+1. **Step 1 — Distance Matrix (Plasma Substrate):** Constructs the symmetric $N \times N$ Euclidean distance matrix $D_{ij} = \|\mathbf{x}_i - \mathbf{x}_j\|_2$ over node spatial embedding coordinates $\mathbf{x} \in \mathbb{R}^d$ in $O(N^2)$ time.
+2. **Step 2 — Quench Binding & Seed Selection:** Employs farthest-point sampling to select $K$ cluster seed indices $\{s_1, \ldots, s_K\}$, then binds each remaining node to its nearest seed in $O(N \cdot K)$ time. Nodes within distance $T_q^{\text{RGG}}$ form tight binding kernels around centroids.
+
+### 9.3 Multi-Phase Execution Workflow
+
+The complete QCA Parallel pipeline operates across four distinct phases:
+
+```mermaid
+flowchart TD
+    A["Input Problem Dataset\nN QCANodes (Spatial + 5-Prime Embeddings)"] --> B["Phase 1: QCA Crystallization\nBuild O(N^2) Distance Matrix D_ij\nCompute T_q^RGG = γ·sqrt(A·ln(N/K)/(π·N))"]
+    B --> C["Farthest-Point Seed Selection & Nearest Binding\nForm K Independent Clusters"]
+    
+    C --> D1["Worker 1 (Cluster 0)\nFDSA Pruning + Actualizer Steering"]
+    C --> D2["Worker 2 (Cluster 1)\nFDSA Pruning + Actualizer Steering"]
+    C --> D3["Worker K (Cluster K-1)\nFDSA Pruning + Actualizer Steering"]
+    
+    D1 & D2 & D3 --> E["Phase 3: Global Synthesis Pass\nCollect Cluster Results → Metacluster Substrate\nFDSA Meta-Logit Pruning + Final Steering Pass"]
+    
+    E --> F["Check Trace Bifurcation Gate\nTr(D_μν) <= τ_bifurcation"]
+    F --> G["Final Actualized Solution S*\nGlobal Valuation ν_final & Audit Trace"]
+
+    style A fill:#1565c0,color:#fff
+    style B fill:#e65100,color:#fff
+    style D1 fill:#6a1b9a,color:#fff
+    style D2 fill:#6a1b9a,color:#fff
+    style D3 fill:#6a1b9a,color:#fff
+    style E fill:#00695c,color:#fff
+    style G fill:#2e7d32,color:#fff
+```
+
+1. **Phase 1 — QCA Crystallization:** Partitioning $N$ nodes into $K$ crystallization clusters via $T_q^{\text{RGG}}$ thresholding.
+2. **Phase 2 — Parallel Cluster Execution:** Dispatching clusters to $K$ parallel workers. Each worker process executes:
+   - **FDSA Vocabulary Pruning:** Grammar rules and contextual constraint filtering via `VectorizedFDSAPruner`.
+   - **Actualizer Engine Steering:** Quadratic structural entropy defect $H(R) = \text{Var}(\alpha) + (\sum \alpha_i^2 - 1)^2$ calculation and contractive Banach fixed-point iteration.
+3. **Phase 3 — Global Synthesis:** Aggregating cluster actualized tokens into a unified metacluster probability substrate, executing meta-logit FDSA pruning, and conducting a final Actualizer steer pass strictly gated by the trace drift condition $\text{Tr}(D_{\mu\nu}) \le \tau_{\text{bifurcation}}$.
+4. **Phase 4 — Speedup & Latency Benchmarking:** Empirically validating parallel processing speedup $S = T_{\text{seq}} / T_{\text{par}}$ against single-dataset sequential execution.
+
+### 9.4 Multi-Backend Architecture (`processes`, `jax`, `auto`)
+
+The `QCAParallelEngine` supports three interchangeable execution backends to optimize performance across different hardware environments:
+
+| **Backend** | **Mechanism** | **Target Hardware** | **Use Case** |
+|---|---|---|---|
+| `processes` (Default) | Python `ProcessPoolExecutor` multiprocessing | Multi-core CPUs | CPU parallel execution bypassing Python GIL |
+| `jax` | Vectorized array ops (`jnp.ndarray`) & `@jax.jit` compiled kernels | GPU / TPU / CPU SIMD | Massive parallel tensor throughput on hardware accelerators |
+| `auto` | Automatic runtime feature detection | Hybrid environments | Uses JAX if installed; gracefully falls back to process workers |
+
+### 9.5 Python API & Usage Example
+
+The QCA Parallel Engine is accessed via the [qca_parallel_engine.py](file:///d:/Mohamed/Desktop/Concisness%20Framework/Consciousness%20and%20Prime%20Base%20Intelligence/Final_Output/02_Core_Engine/qca_parallel_engine.py) module:
+
+```python
+from qca import QCANode
+from qca_parallel_engine import QCAParallelEngine
+
+# 1. Initialize dataset of N nodes with 5D spatial coords & 5-Prime profiles
+nodes = [
+    QCANode(node_id=i, coords=[0.5, 1.2, 3.4, 0.8, 2.1], prime_profile=[0.25, 0.20, 0.15, 0.25, 0.15])
+    for i in range(200)
+]
+
+# 2. Instantiate QCA Parallel Engine (Auto-detect JAX or Multiprocessing)
+engine = QCAParallelEngine(
+    K=5,                     # Target crystallization clusters
+    vocab_size=1000,         # Substrate vocabulary size V
+    mercy_k=0.45,            # Banach contraction coefficient
+    Q_c=1e-5,                # L2 convergence tolerance
+    tau_bifurcation=5.0,     # Bifurcation threshold for Tr(D_μν)
+    backend="auto",          # 'processes', 'jax', or 'auto'
+    context_type="logical_coding",
+    seed=42,
+)
+
+# 3. Execute parallel pipeline (Phase 1 → Phase 2 → Phase 3)
+result = engine.process_parallel(nodes, verbose=True)
+
+# 4. Access synthesis results & benchmark metrics
+print(f"Final Actualized Token S* : {result.final_token}")
+print(f"Global Valuation ν_final   : {result.global_valuation:.4f}")
+print(f"Global Trace Drift Tr(D)  : {result.global_drift:.4f}")
+print(f"Total Execution Time      : {result.total_time_ms:.2f} ms")
+print(f"Backend Used              : {result.backend_used}")
+```
+
+---
+
+## 10. Summary Table
+
+The following table provides a complete, single-view mapping of every phase of the Actualizer Engine and QCA Parallel Engine to its mathematical operator, corresponding Conceptual Prime(s), and JAX/Python implementation.
 
 | **#** | **Algorithm Phase** | **Mathematical Operator** | **Conceptual Prime(s)** | **Python / JAX Method** |
 |---|---|---|---|---|
@@ -729,6 +844,9 @@ The following table provides a complete, single-view mapping of every phase of t
 | 12 | **Token actualization** | $S^* = \arg\max_v U^*(v)$ | All Primes (enforced by $U^*$) | `jnp.argmax(U_star)` |
 | 13 | **JIT compilation** | $\mathcal{F} = \bigcirc_i \mathcal{O}_i$ (composed pipeline) | All Primes (fused) | `jax.jit(actualize_pipeline)` |
 | 14 | **Batch vectorization** | $\{S^*_b\}_{b=1}^B$ | All Primes (per sequence) | `jax.vmap(actualize_pipeline)` |
+| 15 | **QCA $T_q^{\text{RGG}}$ Quench Clustering** | $T_q^{\text{RGG}} = \gamma \sqrt{\frac{A \ln(N/K)}{\pi N}}$ | Spatial / Prime Embedding | `quench_temperature(N, K, A, gamma)` |
+| 16 | **QCA Parallel Worker Dispatch** | Work $= O(N^2/K)$ | All Primes (per cluster) | `ProcessPoolExecutor` / JAX `vmap` |
+| 17 | **Global Metacluster Synthesis** | Final FDSA + Actualizer steer | All Primes (synthesized) | `engine.steer(pruned_meta)` |
 
 ---
 
@@ -753,6 +871,9 @@ The following table provides a complete, single-view mapping of every phase of t
 | $W$ | Prime weight matrix $\mathrm{diag}(\lambda_O, \lambda_J, \lambda_M, \lambda_K, \lambda_P)$ |
 | $H(P)$ | Shannon entropy: $-\sum_v P(v) \log P(v)$ |
 | $D_{\mathrm{KL}}(P \| Q)$ | Kullback-Leibler divergence from $Q$ to $P$ |
+| $T_q^{\text{RGG}}$ | Canonical Quench Temperature threshold for RGG partitioning |
+| $K$ | Target number of parallel QCA crystallization clusters |
+| $\gamma$ | Coupling constant for RGG quench temperature calculation |
 
 ---
 
@@ -769,6 +890,8 @@ The following table provides a complete, single-view mapping of every phase of t
 | Mercy weight | $\lambda_M$ | 0.15 | $[0, 1]$ | Stronger corrective bias |
 | Knowledge weight | $\lambda_K$ | 0.25 | $[0, 1]$ | Stronger anti-hallucination |
 | Power weight | $\lambda_P$ | 0.15 | $[0, 1]$ | Stronger causal preservation |
+| Parallel Clusters | $K$ | 5 | $[2, 64]$ | Higher parallelism; lower per-cluster size $N/K$ |
+| Parallel Backend | `backend` | `"processes"` | `{"processes", "jax", "auto"}` | Selects CPU multiprocessing or JAX GPU/TPU vectorization |
 
 ---
 
