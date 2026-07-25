@@ -386,10 +386,12 @@ class ActualizerEngine:
             if v not in target_tokens:
                 D[v] += w_G * self.global_drift_penalty
             # D_future: structural entropy gradient proxy (Knowledge Prime)
-            # log(p_v) is negative (entropy increases as p_v decreases)
-            # Tokens with very low p contribute more future uncertainty.
-            entropy_grad = -math.log(max(p_v, 1e-12))
-            D[v] += w_F * entropy_grad * 0.08
+            # −∂(entropy)/∂p_v = log(p_v) + 1  (Shannon entropy gradient)
+            # This is negative for p_v < 1/e (low-prob tokens → attracting,
+            # reduces drift) and positive for p_v > 1/e (high-prob tokens →
+            # repelling, increases drift toward redistribution).
+            entropy_grad = math.log(max(p_v, 1e-12)) + 1.0
+            D[v] += w_F * entropy_grad
 
         return D
 

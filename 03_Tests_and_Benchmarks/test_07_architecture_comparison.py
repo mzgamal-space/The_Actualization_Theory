@@ -435,7 +435,7 @@ if __name__ == "__main__":
         vocab_sizes    = (500, 1000, 2000),
         n_steps        = 30,
         n_sizes        = (20, 40, 80, 120, 200),
-        K              = 5,
+        K              = 10,
         distractor_str = 8.0,
         mercy_k        = 0.45,
         seed           = 42,

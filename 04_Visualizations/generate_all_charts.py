@@ -4,7 +4,7 @@ generate_all_charts.py — Master Visualization Generator  [V3_U1 updated]
 Runs all test modules and produces 5 publication-quality PNG charts.
 All charts use a dark, premium design consistent with modern ML papers.
 
-Output files (saved to 04_Visualizations/):
+Output files (saved to 04_Visualizations/png/):
   fig1_hallucination_comparison.png
   fig2_repetition_suppression.png
   fig3_speed_comparison.png
@@ -20,7 +20,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
-OUT_DIR = os.path.dirname(os.path.abspath(__file__))
+OUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'png')
+os.makedirs(OUT_DIR, exist_ok=True)
+
 
 # ── Shared style ───────────────────────────────────────────────────────────
 BG       = "#0d1117"
@@ -348,7 +350,7 @@ def fig5_v3u1_valuation():
 def fig6_qca_parallel_speedup():
     print("\n[Fig 6] Running QCA Parallel Engine benchmark...")
     import test_06_qca_parallel_engine as t6
-    r = t6.run(n_sizes=(20, 40, 80, 120, 200), K=5, vocab_size=1000)
+    r = t6.run(n_sizes=(20, 40, 80, 120, 200), K=10, vocab_size=1000)
     n_sizes = r["n_sizes"]
     t_seq   = r["sequential_ms"]
     t_par   = r["parallel_ms"]
@@ -403,7 +405,7 @@ def fig7_architecture_comparison():
 
     Panel 1: Grounding / Hallucination / Repetition rates (quality metrics bar chart)
     Panel 2: Latency vs vocabulary size V — Baseline vs Actualizer
-    Panel 3: QCA Parallel speedup vs dataset size N (K=5, V=2000)
+    Panel 3: QCA Parallel speedup vs dataset size N (K=10, V=2000)
     """
     # ── Empirical results (from test_07 run: V=500, n_steps=30, distractor=+8.0) ──
     models       = ["Attention\nBaseline", "Actualizer\nEngine", "QCA Parallel\nEngine"]
@@ -498,7 +500,7 @@ def fig7_architecture_comparison():
     ax3.fill_between(n_sizes, par_ms, seq_ms, alpha=0.12, color=C_FDSA, label="Parallel savings")
 
     ax3_r.plot(n_sizes, speedup, '^-', color=C_GOLD, lw=2, ms=8, label="Speedup factor")
-    ax3_r.axhline(y=5.0, color=C_PURPLE, lw=1, ls=':', alpha=0.7, label="K=5× theoretical max")
+    ax3_r.axhline(y=10.0, color=C_PURPLE, lw=1, ls=':', alpha=0.7, label="K=10× theoretical max")
 
     for n, sp in zip(n_sizes, speedup):
         ax3_r.annotate(f"{sp:.2f}×", xy=(n, sp), xytext=(n + 3, sp + 0.06),
@@ -508,8 +510,8 @@ def fig7_architecture_comparison():
     ax3.set_ylabel("Execution Time (ms)", color=C_TEXT)
     ax3_r.set_ylabel("Speedup Factor", color=C_GOLD)
     ax3_r.tick_params(axis='y', colors=C_GOLD)
-    ax3_r.set_ylim(0, 6.5)
-    ax3.set_title(f"QCA Parallel Engine Speedup\n(K=5, V=2000)", fontsize=11, color=C_TEXT)
+    ax3_r.set_ylim(0, 11.5)
+    ax3.set_title(f"QCA Parallel Engine Speedup\n(K=10, V=2000)", fontsize=11, color=C_TEXT)
 
     lines_a, labels_a = ax3.get_legend_handles_labels()
     lines_b, labels_b = ax3_r.get_legend_handles_labels()
@@ -642,8 +644,8 @@ def fig8_latency_fix_analysis():
                      f"{spd:.2f}×\nfaster", ha='center', va='center', fontsize=9,
                      color='black', fontweight='bold')
 
-    ax4.set_ylabel("Latency (ms, N=80, K=5, V=1000)", color=C_TEXT)
-    ax4.set_title("QCA Parallel: JAX vs Processes\n(N=80, K=5, V=1000)", fontsize=10, color=C_TEXT)
+    ax4.set_ylabel("Latency (ms, N=80, K=10, V=1000)", color=C_TEXT)
+    ax4.set_title("QCA Parallel: JAX vs Processes\n(N=80, K=10, V=1000)", fontsize=10, color=C_TEXT)
     ax4.grid(True, axis='y', alpha=0.4)
     ax4.text(0.5, 0.95, f"JAX available: YES\nJAX 2.04x faster than\nProcessPoolExecutor",
              transform=ax4.transAxes, ha='center', va='top', fontsize=8.5, color=C_GOLD,

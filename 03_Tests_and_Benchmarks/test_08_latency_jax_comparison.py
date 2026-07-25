@@ -507,6 +507,6 @@ if __name__ == "__main__":
         distractor  = 8.0,
         seed        = 42,
         qca_N       = 80,
-        qca_K       = 5,
+        qca_K       = 10,
         qca_V       = 1000,
     )

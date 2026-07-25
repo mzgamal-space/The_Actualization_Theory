@@ -179,9 +179,16 @@ def test_fix5_mercy_k_alias():
 
 def test_fix6_causal_snap_gating():
     """
-    [FIX-6] The causal snap (Power Prime) should return actualized=False
-    only when Tr(D_μν) > tau_bifurcation.
-    We test this by setting tau_bifurcation very low (0.0) so it always dissolves.
+    [FIX-6] The causal snap (Power Prime) must be gated by Tr(D_mu_nu):
+      - Tr_D <= tau_bifurcation  -->  actualized=True   (actualization branch)
+      - Tr_D >  tau_bifurcation  -->  actualized=False  (dissolution branch)
+
+    We test BOTH branches by running the same substrate with two different
+    tau_bifurcation values:
+      Case A: tau=+100  (generous) --> Tr_D will be <= 100  --> actualized=True
+      Case B: tau=-100  (impossible) --> Tr_D will be > -100 is always true...
+              Actually use tau=-1e9 to guarantee Tr_D > tau is impossible.
+              Better: use the Tr_D from case A, then set tau just below it.
     """
     V = 100
     logits = [0.0] * V
@@ -189,20 +196,39 @@ def test_fix6_causal_snap_gating():
     history = [48, 49, 50]
     targets = set(range(50, 80))
 
-    # tau_bifurcation = 0.0 → Tr_D always exceeds tau → dissolution branch
-    engine = ActualizerEngine(vocab_size=V, mercy_k=0.45, Q_c=1e-5,
-                               tau_bifurcation=0.0)
-    tok, _, Tr_D, iters, nu_hist, actualized = engine.steer(logits, history, targets)
+    # Case A: generous tau → actualization branch
+    engine_a = ActualizerEngine(vocab_size=V, mercy_k=0.45, Q_c=1e-5,
+                                 tau_bifurcation=100.0)
+    tok_a, _, Tr_D_a, iters_a, _, actualized_a = engine_a.steer(
+        logits, history, targets)
 
-    # With tau=0, ANY positive trace → dissolution
-    # Fallback: most recent token in history ∩ targets or 0
-    assert not actualized, \
-        f"Expected DISSOLUTION branch with tau=0.0, got actualized=True"
+    assert actualized_a, \
+        f"Case A: Expected actualization with tau=100, Tr_D={Tr_D_a:.8f}"
+
+    # Case B: set tau well BELOW the measured Tr_D to force dissolution
+    # Tr_D_a is the actual converged trace; set tau below it
+    forced_tau = Tr_D_a - 1.0   # guaranteed: Tr_D > forced_tau
+    engine_b = ActualizerEngine(vocab_size=V, mercy_k=0.45, Q_c=1e-5,
+                                 tau_bifurcation=forced_tau)
+    tok_b, _, Tr_D_b, iters_b, _, actualized_b = engine_b.steer(
+        logits, history, targets)
+
+    assert not actualized_b, \
+        f"Case B: Expected dissolution with tau={forced_tau:.4f}, Tr_D={Tr_D_b:.8f}"
+
+    # Verify the gating is consistent: same substrate, different tau → different branch
+    assert actualized_a != actualized_b, \
+        "Gating test: same substrate must yield different branches for different tau"
+
     return {
-        "passed"    : True,
-        "tok"       : tok,
-        "Tr_D"      : round(Tr_D, 8),
-        "actualized": actualized,
+        "passed"      : True,
+        "case_a_tok"  : tok_a,
+        "case_a_Tr_D" : round(Tr_D_a, 8),
+        "case_a_act"  : actualized_a,
+        "case_b_tok"  : tok_b,
+        "case_b_Tr_D" : round(Tr_D_b, 8),
+        "case_b_act"  : actualized_b,
+        "forced_tau"  : round(forced_tau, 8),
     }
 
 
