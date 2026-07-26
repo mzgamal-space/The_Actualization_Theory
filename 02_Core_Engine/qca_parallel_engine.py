@@ -30,6 +30,7 @@ import os
 import time
 import math
 import random
+import multiprocessing
 from dataclasses import dataclass, field
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set, Tuple, Any
@@ -217,6 +218,26 @@ class QCAParallelEngine:
       • Vectorized JAX execution (jnp array operations)
       • Crystallization via QuenchClusterAlgorithm
       • Global synthesis via ActualizerEngine + FDSAPruner
+
+    IMPORTANT SCOPE NOTE (added this pass, after tracing a real reported
+    result back to this file):
+    ----------------------------------------------------------------------
+    This engine's `actualized_tokens` output is a STEERING DIAGNOSTIC over
+    a SYNTHETIC per-node logit distribution (see `_worker_process_cluster`:
+    each node's logits are drawn from a Gaussian seeded by that node's
+    embedding-derived coordinates, NOT produced by running a real model's
+    decoder). This module does NOT call model.generate(), does NOT produce
+    real decoded text, and its output tokens CANNOT be meaningfully compared
+    against real ground-truth answers (there is no text decode step here at
+    all). Any EM/F1 metric reported "from" this engine's output was computed
+    elsewhere, from different data, and reused -- not computed from this
+    engine's actual return values. If you need a real end-to-end generation
+    benchmark, this class is the clustering/steering-diagnostic layer, not
+    the generation layer -- it would need a genuine per-cluster call into a
+    real model's forward pass wired in, which is not what
+    `_worker_process_cluster` currently does. This is flagged here explicitly
+    so this specific mistake -- reporting this module's synthetic output as
+    if it were a real-dataset generation result -- cannot recur silently.
 
     Parameters
     ----------
@@ -419,7 +440,18 @@ class QCAParallelEngine:
 
         cluster_results_dict: Dict[int, ClusterProcessResult] = {}
 
-        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
+        # FIXED (this pass): ProcessPoolExecutor defaults to 'fork' on Linux.
+        # If a JAX/TPU runtime is already initialized in this process (as it
+        # will be in any real generation pipeline), forking produces the
+        # documented "os.fork() incompatible with multithreaded JAX" warning
+        # and can silently corrupt or deadlock worker state without raising
+        # an exception -- observed directly during testing of this module.
+        # 'spawn' starts each worker as a fresh Python process instead,
+        # avoiding this entirely, at the cost of slightly higher startup
+        # overhead per worker (each worker re-imports its modules).
+        mp_context = multiprocessing.get_context("spawn")
+
+        with ProcessPoolExecutor(max_workers=self.n_workers, mp_context=mp_context) as executor:
             futures = {executor.submit(_worker_process_cluster, p): p["cluster_id"] for p in payloads}
             for future in as_completed(futures):
                 cid = futures[future]
@@ -588,8 +620,8 @@ if __name__ == "__main__":
         sys.stdout.reconfigure(encoding="utf-8")
 
     print("Testing QCAParallelEngine (Processes & JAX Backends)...")
-    N = 80
-    K = 4
+    N = 1000
+    K = 10
     dim = 5
 
     rng = random.Random(42)

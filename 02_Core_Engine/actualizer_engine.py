@@ -380,18 +380,24 @@ class ActualizerEngine:
         #     This is a numerically tractable approximation of the Hessian diagonal.
         for v in range(self.V):
             p_v = U[v]
-            if p_v == 0.0:
-                continue
+            # FIXED: removed "if p_v == 0.0: continue" -- that skip silently
+            # dropped the D_global penalty for any token already masked to
+            # exactly zero probability (e.g. by an upstream pruner setting
+            # logits to -inf). numpy_actualizer_engine.py applies D_global
+            # unconditionally; this now matches, so steer() behaves the same
+            # whether called on raw logits or pruner-masked logits.
             # D_global
             if v not in target_tokens:
                 D[v] += w_G * self.global_drift_penalty
             # D_future: structural entropy gradient proxy (Knowledge Prime)
-            # −∂(entropy)/∂p_v = log(p_v) + 1  (Shannon entropy gradient)
-            # This is negative for p_v < 1/e (low-prob tokens → attracting,
-            # reduces drift) and positive for p_v > 1/e (high-prob tokens →
-            # repelling, increases drift toward redistribution).
-            entropy_grad = math.log(max(p_v, 1e-12)) + 1.0
-            D[v] += w_F * entropy_grad
+            # -d(entropy)/dp_v = log(p_v) + 1, exactly as derived in the
+            # docstring above. FIXED (this pass): this line previously computed
+            # -log(p_v)*0.08, a different, undocumented formula not matching
+            # its own docstring, and not matching numpy_actualizer_engine.py's
+            # _drift_tensor, which already implemented log(p_v)+1 correctly.
+            # That mismatch caused Tr(D_mu_nu) to differ by orders of magnitude
+            # between the two "equivalent" engines on identical inputs.
+            D[v] += w_F * (math.log(max(p_v, 1e-12)) + 1.0)
 
         return D
 
