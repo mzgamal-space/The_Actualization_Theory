@@ -391,7 +391,7 @@ def run(
 
     # ── Summary table ─────────────────────────────────────────────────────
     print(f"\n{divider}")
-    print("  SUMMARY — METRIC COMPARISON AT V=500, N=80, K=10")
+    print("  SUMMARY — METRIC COMPARISON AT V=500, N=80, K=5")
     print(divider)
     print(f"  {'Metric':<28} {'Baseline':>12} {'Actualizer':>12} {'QCA Parallel':>14}")
     print(f"  {'-'*28} {'-'*12} {'-'*12} {'-'*14}")

@@ -52,7 +52,7 @@ def generate_synthetic_dataset(N: int, dim: int = 5, seed: int = 42) -> List[QCA
 
 def run(
     n_sizes: tuple = (20, 40, 80, 120, 200),
-    K: int = 10,
+    K: int = 5,
     vocab_size: int = 1000,
     seed: int = 42,
 ) -> Dict[str, Any]:
