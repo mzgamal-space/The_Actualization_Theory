@@ -85,6 +85,7 @@ class NumpyActualizerEngine:
         repetition_penalty  : float = 2.0,
         global_drift_penalty: float = 1.5,
         h_max               : float = 2.0,
+        prime_weights       : dict = None,
     ) -> None:
         self.V       = vocab_size
         self.k       = mercy_k
@@ -96,10 +97,20 @@ class NumpyActualizerEngine:
         self.glob_pen   = global_drift_penalty
         self.h_max      = h_max
 
-        # Prime weights (V3_U1 §5.3 defaults)
-        self.w_L = 0.35   # Order   → D_local
-        self.w_G = 0.35   # Justice → D_global
-        self.w_F = 0.20   # Knowledge → D_future
+        # FIXED (this pass): this engine previously hardcoded w_L/w_G/w_F as
+        # fixed constants, silently dropping the domain-conditional
+        # prime_weights capability that actualizer_engine.py (the reference
+        # implementation) already supports via its constructor. Now matches:
+        # accepts an optional dict, same keys/defaults as
+        # ActualizerEngine.DEFAULT_PRIME_WEIGHTS, read into instance
+        # attributes here (numpy doesn't need per-call dict lookups the way
+        # the reference does, since this engine is reconstructed per domain
+        # rather than reused across domains -- see derive_domain_weights()
+        # in fdsa_pruner.py for the intended calling pattern).
+        pw = prime_weights or {"Order": 0.35, "Justice": 0.35, "Knowledge": 0.20}
+        self.w_L = pw.get("Order", 0.35)      # Order   -> D_local
+        self.w_G = pw.get("Justice", 0.35)    # Justice -> D_global
+        self.w_F = pw.get("Knowledge", 0.20)  # Knowledge -> D_future
 
         # Pre-allocate reusable arrays for speed
         self._vocab_idx = np.arange(vocab_size, dtype=np.int64)
