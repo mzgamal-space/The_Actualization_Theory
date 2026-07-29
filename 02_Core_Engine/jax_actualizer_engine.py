@@ -53,6 +53,12 @@ from typing import List, Set, Tuple
 import jax
 import jax.numpy as jnp
 from jax import lax
+# ── Number of Primes (dimensionality of the Prime Hilbert Space H, §3.1) ──
+N_PRIMES = 5
+
+# ── Symmetric equilibrium ground state (Theorem 3.2) ──────────────────────
+# α_i = 1/√5 for all i.  At this point H(R) = 0 (zero drift).
+EQUILIBRIUM_ALPHA = 1.0 / math.sqrt(N_PRIMES)   # ≈ 0.4472
 
 
 class JaxActualizerEngine:

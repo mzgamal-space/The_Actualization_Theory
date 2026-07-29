@@ -5,6 +5,7 @@ Author : Mohamed Gamal Eldin Abdelaziz Noureldin
          Independent Researcher | ORCID: 0009-0006-3991-1153
          Contact: mz.gamal@gmail.com
 Module : Final_Output/02_Core_Engine/qca_parallel_engine.py
+Engine : JaxActualizerEngine (jax_actualizer_engine) — JIT-compiled JAX contractive steering
 
 Theory & Architecture
 ---------------------
@@ -36,7 +37,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 
 # Core module imports
 from qca import QuenchClusterAlgorithm, QCANode, QCACluster, QuenchResult
-from actualizer_engine import ActualizerEngine, EQUILIBRIUM_ALPHA, N_PRIMES
+from jax_actualizer_engine import JaxActualizerEngine
 from fdsa_pruner import VectorizedFDSAPruner
 from numpy_actualizer_engine import NumpyActualizerEngine
 
@@ -216,7 +217,7 @@ class QCAParallelEngine:
       • Parallel Processes execution (multiprocessing ProcessPoolExecutor)
       • Vectorized JAX execution (jnp array operations)
       • Crystallization via QuenchClusterAlgorithm
-      • Global synthesis via ActualizerEngine + FDSAPruner
+      • Global synthesis via JaxActualizerEngine (jax_actualizer_engine) + FDSAPruner
 
     Parameters
     ----------
@@ -268,7 +269,7 @@ class QCAParallelEngine:
 
         self.qca = QuenchClusterAlgorithm(K=K, seed=seed)
         self.pruner = VectorizedFDSAPruner(vocab_size=vocab_size, k=mercy_k)
-        self.engine = ActualizerEngine(
+        self.engine = JaxActualizerEngine(
             vocab_size=vocab_size,
             mercy_k=mercy_k,
             Q_c=Q_c,
@@ -320,38 +321,13 @@ class QCAParallelEngine:
                     context_type=self.context_type,
                 )
 
-                # Vectorized JAX / NumPy kernel simulation
-                if HAS_JAX:
-                    # Convert to JAX array and run contractive steering
-                    logits_jax = jnp.array(pruned_logits)
-                    max_l = jnp.max(jnp.where(jnp.isfinite(logits_jax), logits_jax, -1e9))
-                    exps = jnp.exp(jnp.where(jnp.isfinite(logits_jax), logits_jax - max_l, -1e9))
-                    U = exps / jnp.sum(exps)
-
-                    # Vectorized Banach Contraction loop
-                    for iter_idx in range(self.max_iters):
-                        U_prev = U
-                        # Vacuum Brake decay proxy
-                        decay = jnp.exp(-0.1 / self.engine.tau)
-                        U_braked = U * decay
-                        U_braked = U_braked / jnp.sum(U_braked)
-                        U = self.mercy_k * U_braked + (1.0 - self.mercy_k) * U_prev
-
-                    token = int(jnp.argmax(U))
-                    # Entropy calculation: H(R) = Var(alpha) + (sum(alpha^2)-1)^2
-                    alpha_K = float(jnp.max(U))
-                    alpha_vec = [alpha_K / 5.0] * 5
-                    H_R = self.engine._structural_entropy(alpha_vec)
-                    val = float(1.0 - H_R / self.engine.h_max)
-                    drift = float(jnp.sum(U * 0.1))
-                    act = (drift <= self.tau_bifurcation)
-                else:
-                    token, U_final, drift, iters, nu_hist, act = self.engine.steer(
-                        logits=pruned_logits,
-                        history=history,
-                        target_tokens=target_tokens,
-                    )
-                    val = nu_hist[-1] if nu_hist else 0.0
+                # JaxActualizerEngine contractive steering (JIT-compiled)
+                token, U_final, drift, iters, act = self.engine.steer(
+                    logits=pruned_logits,
+                    history=history,
+                    target_tokens=target_tokens,
+                )
+                val = float(jnp.max(U_final)) if HAS_JAX and hasattr(U_final, '__jax_array__') else float(max(U_final))
 
                 node_ids.append(nid)
                 tokens.append(token)
@@ -501,7 +477,7 @@ class QCAParallelEngine:
             context_type=self.context_type,
         )
 
-        final_token, U_synth, final_drift, total_iters, nu_hist, is_act = self.engine.steer(
+        final_token, U_synth, final_drift, total_iters, is_act = self.engine.steer(
             logits=pruned_meta,
             history=synth_history,
             target_tokens=target_set if target_set else set(range(self.vocab_size)),
@@ -512,7 +488,7 @@ class QCAParallelEngine:
 
         t_end = time.perf_counter()
         total_ms = (t_end - t_start) * 1000.0
-        global_val = nu_hist[-1] if nu_hist else 0.0
+        global_val = float(jnp.max(U_synth)) if HAS_JAX and hasattr(U_synth, '__jax_array__') else float(max(U_synth))
 
         log.append(f"[Step 3 — Synthesis] Final actualized token={final_token}, val={global_val:.4f}, drift={final_drift:.4f} in {syn_ms:.2f} ms")
         log.append(f"[QCA_Parallel_Engine] Complete in {total_ms:.2f} ms (backend={effective_backend})")
@@ -564,6 +540,7 @@ class QCAParallelEngine:
                 context_type=self.context_type,
             )
 
+            # JaxActualizerEngine returns (token, U_final, Tr_D, iters, actualized)
             self.engine.steer(
                 logits=pruned_logits,
                 history=history,
