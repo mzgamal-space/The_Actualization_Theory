@@ -15,14 +15,23 @@ Reference: CKT White Paper v3, §7.2 — Theorem 2 Corollary:
   over processing a single dataset sequentially at cost O(N²).
 
 Execution Backends Supported:
-  1. backend="processes" (Default):
-     Spawns K CPU worker processes via Python's ProcessPoolExecutor to execute
-     FDSA pre-inference logit pruning and Actualizer contractive steering in parallel.
-  2. backend="jax":
-     Vectorized parallel cluster processing via JAX (jnp.ndarray & @jax.jit ops).
+  1. backend="threads" (Default):
+     Fans out K cluster workers across a persistent ThreadPoolExecutor that is
+     created ONCE at __init__ time and reused across all calls.  Zero per-call
+     spawn overhead.  Best choice on Windows (no fork, spawn is expensive).
+  2. backend="processes":
+     Uses a persistent ProcessPoolExecutor (also created at __init__).  Faster
+     than per-call spawn; best for CPU-bound workloads with large N per cluster.
+  3. backend="jax":
+     Vectorized parallel cluster processing via JAX (jnp.ndarray & @jax.jit).
      Processes all K clusters in parallel on GPU/TPU/CPU SIMD vector units.
-  3. backend="auto":
-     Automatically uses JAX if jax is installed; falls back to parallel processes.
+  4. backend="auto":
+     Uses JAX if available, else falls back to "threads".
+
+PERFORMANCE NOTE: The root cause of slow parallel mode was that both
+ProcessPoolExecutor and ThreadPoolExecutor were created inside the hot-path
+method on every single call.  On Windows, spawning processes costs ~200–800 ms
+per call.  Pool are now created ONCE at __init__ and reused.
 """
 
 from __future__ import annotations
@@ -32,7 +41,7 @@ import time
 import math
 import random
 from dataclasses import dataclass, field
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set, Tuple, Any
 
 # Core module imports
@@ -108,6 +117,14 @@ class QCAParallelResult:
 # ---------------------------------------------------------------------------
 # Top-Level Worker Function (Pickleable for Windows Multiprocessing)
 # ---------------------------------------------------------------------------
+
+def _worker_initializer():
+    """Pre-import heavy modules in each worker process so they are available
+    without re-importing on every task submission."""
+    import numpy  # noqa: F401
+    from fdsa_pruner import VectorizedFDSAPruner  # noqa: F401
+    from numpy_actualizer_engine import NumpyActualizerEngine  # noqa: F401
+
 
 def _worker_process_cluster(payload: dict) -> dict:
     """
@@ -267,9 +284,9 @@ class QCAParallelEngine:
         self.context_type    = context_type
         self.seed            = seed
 
-        self.qca = QuenchClusterAlgorithm(K=K, seed=seed)
-        self.pruner = VectorizedFDSAPruner(vocab_size=vocab_size, k=mercy_k)
-        self.engine = JaxActualizerEngine(
+        self.qca    = QuenchClusterAlgorithm(K=K, seed=seed)
+        self.pruner  = VectorizedFDSAPruner(vocab_size=vocab_size, k=mercy_k)
+        self.engine  = JaxActualizerEngine(
             vocab_size=vocab_size,
             mercy_k=mercy_k,
             Q_c=Q_c,
@@ -277,57 +294,82 @@ class QCAParallelEngine:
             max_iters=max_iters,
         )
 
+        # ── Persistent worker pools — created ONCE, reused across all calls ──
+        # This eliminates the ~200–800 ms Windows spawn overhead that occurs
+        # when a pool is created inside the hot-path method on every call.
+        effective = self.backend if self.backend != "auto" else ("jax" if HAS_JAX else "threads")
+        self._effective_backend = effective
+
+        self._thread_pool: Optional[ThreadPoolExecutor] = None
+        self._process_pool: Optional[ProcessPoolExecutor] = None
+
+        if effective == "threads":
+            self._thread_pool = ThreadPoolExecutor(max_workers=self.n_workers)
+        elif effective == "processes":
+            self._process_pool = ProcessPoolExecutor(
+                max_workers=self.n_workers,
+                initializer=_worker_initializer,
+            )
+
+    def shutdown(self) -> None:
+        """Release persistent pools. Call when done with this engine instance."""
+        if self._thread_pool is not None:
+            self._thread_pool.shutdown(wait=False)
+            self._thread_pool = None
+        if self._process_pool is not None:
+            self._process_pool.shutdown(wait=False)
+            self._process_pool = None
+
+    def __del__(self) -> None:
+        try:
+            self.shutdown()
+        except Exception:
+            pass
+
     # -----------------------------------------------------------------------
-    # JAX Vectorized Parallel Cluster Execution Backend
+    # Thread Pool Execution Backend (default)
     # -----------------------------------------------------------------------
 
-    def _process_clusters_jax(
+    def _process_clusters_threads(
         self,
         clusters: List[QCACluster],
         grammar_rules: Optional[Dict[int, Set[int]]],
     ) -> List[ClusterProcessResult]:
         """
-        Executes parallel cluster steering using vectorized JAX / NumPy operations.
+        Execute per-cluster steering using the persistent ThreadPoolExecutor.
+        Thread-based fan-out: zero spawn overhead, GIL-released for NumPy I/O.
         """
-        cluster_results: List[ClusterProcessResult] = []
-
-        for cluster in clusters:
+        def _run_cluster(cluster: QCACluster) -> ClusterProcessResult:
             t0 = time.perf_counter()
-            node_ids = []
-            tokens = []
-            drifts = []
-            vals = []
-            acts = []
+            node_ids, tokens, drifts, vals, acts = [], [], [], [], []
 
             for n in cluster.nodes:
-                nid = n.node_id
-                coords = n.coords
+                nid        = n.node_id
+                coords     = n.coords
                 prime_prof = n.prime_profile
 
-                dim = len(coords)
+                dim      = len(coords)
                 base_val = sum(coords) / (dim or 1.0)
-                rng = random.Random(nid * 1000 + int(base_val * 100))
-                logits_py = [rng.gauss(base_val, 1.0) for _ in range(self.vocab_size)]
+                rng      = random.Random(nid * 1000 + int(base_val * 100))
+                logits_np = np.array(
+                    [rng.gauss(base_val, 1.0) for _ in range(self.vocab_size)],
+                    dtype=np.float64,
+                )
 
                 target_center = int((prime_prof[0] if prime_prof else 0.5) * self.vocab_size) % self.vocab_size
                 target_tokens = set(range(max(0, target_center - 20), min(self.vocab_size, target_center + 20)))
-                history = [max(0, target_center - 1)]
+                history       = [max(0, target_center - 1)]
+                last_token    = history[-1]
 
-                # FDSA Pruning
-                pruned_logits, active_count = self.pruner.prune_vocabulary(
-                    logits=logits_py,
-                    last_token=history[-1],
-                    grammar_rules=grammar_rules or {},
-                    context_type=self.context_type,
+                pruned_np, _ = self.pruner.prune_numpy(
+                    logits=logits_np, last_token=last_token,
+                    grammar_rules=grammar_rules or {}, context_type=self.context_type,
                 )
 
-                # JaxActualizerEngine contractive steering (JIT-compiled)
                 token, U_final, drift, iters, act = self.engine.steer(
-                    logits=pruned_logits,
-                    history=history,
-                    target_tokens=target_tokens,
+                    logits=pruned_np, history=history, target_tokens=target_tokens,
                 )
-                val = float(jnp.max(U_final)) if HAS_JAX and hasattr(U_final, '__jax_array__') else float(max(U_final))
+                val = float(jnp.max(U_final)) if HAS_JAX and hasattr(U_final, '__jax_array__') else float(np.max(np.asarray(U_final)))
 
                 node_ids.append(nid)
                 tokens.append(token)
@@ -336,30 +378,75 @@ class QCAParallelEngine:
                 acts.append(act)
 
             t1 = time.perf_counter()
-            w_ms = (t1 - t0) * 1000.0
+            m_d  = sum(drifts) / len(drifts) if drifts else 0.0
+            m_v  = sum(vals)   / len(vals)   if vals   else 0.0
+            a_ct = sum(1 for a in acts if a)
+            return ClusterProcessResult(
+                cluster_id=cluster.cluster_id, node_ids=node_ids,
+                actualized_tokens=tokens, trace_drifts=drifts, valuations=vals,
+                actualized_flags=acts, mean_drift=m_d, mean_valuation=m_v,
+                actualized_count=a_ct, worker_time_ms=(t1 - t0) * 1000.0,
+            )
 
-            m_drift = sum(drifts) / len(drifts) if drifts else 0.0
-            m_val   = sum(vals) / len(vals) if vals else 0.0
-            a_count = sum(1 for a in acts if a)
+        pool = self._thread_pool
+        if pool is None:  # fallback: create ad-hoc (shouldn't happen)
+            pool = ThreadPoolExecutor(max_workers=self.n_workers)
 
-            cluster_results.append(ClusterProcessResult(
-                cluster_id=cluster.cluster_id,
-                node_ids=node_ids,
-                actualized_tokens=tokens,
-                trace_drifts=drifts,
-                valuations=vals,
-                actualized_flags=acts,
-                mean_drift=m_drift,
-                mean_valuation=m_val,
-                actualized_count=a_count,
-                worker_time_ms=w_ms,
-            ))
-
-        return cluster_results
+        futures = {pool.submit(_run_cluster, c): c for c in clusters}
+        return [f.result() for f in as_completed(futures)]
 
     # -----------------------------------------------------------------------
     # Process Pool Execution Backend
     # -----------------------------------------------------------------------
+
+    def _process_clusters_jax(
+        self,
+        clusters: List[QCACluster],
+        grammar_rules: Optional[Dict[int, Set[int]]],
+    ) -> List[ClusterProcessResult]:
+        """
+        Executes per-cluster steering sequentially with the JIT-compiled
+        JaxActualizerEngine (no extra parallelism — JAX handles SIMD internally).
+        """
+        results: List[ClusterProcessResult] = []
+        for cluster in clusters:
+            t0 = time.perf_counter()
+            node_ids, tokens, drifts, vals, acts = [], [], [], [], []
+
+            for n in cluster.nodes:
+                dim      = len(n.coords)
+                base_val = sum(n.coords) / (dim or 1.0)
+                rng      = random.Random(n.node_id * 1000 + int(base_val * 100))
+                logits_np = np.array(
+                    [rng.gauss(base_val, 1.0) for _ in range(self.vocab_size)],
+                    dtype=np.float64,
+                )
+                target_center = int((n.prime_profile[0] if n.prime_profile else 0.5) * self.vocab_size) % self.vocab_size
+                target_tokens = set(range(max(0, target_center - 20), min(self.vocab_size, target_center + 20)))
+                history = [max(0, target_center - 1)]
+
+                pruned_np, _ = self.pruner.prune_numpy(
+                    logits=logits_np, last_token=history[-1],
+                    grammar_rules=grammar_rules or {}, context_type=self.context_type,
+                )
+                token, U_final, drift, iters, act = self.engine.steer(
+                    logits=pruned_np, history=history, target_tokens=target_tokens,
+                )
+                val = float(jnp.max(U_final)) if HAS_JAX and hasattr(U_final, '__jax_array__') else float(np.max(np.asarray(U_final)))
+                node_ids.append(n.node_id); tokens.append(token)
+                drifts.append(drift); vals.append(val); acts.append(act)
+
+            t1 = time.perf_counter()
+            results.append(ClusterProcessResult(
+                cluster_id=cluster.cluster_id, node_ids=node_ids,
+                actualized_tokens=tokens, trace_drifts=drifts, valuations=vals,
+                actualized_flags=acts,
+                mean_drift=sum(drifts)/len(drifts) if drifts else 0.0,
+                mean_valuation=sum(vals)/len(vals) if vals else 0.0,
+                actualized_count=sum(1 for a in acts if a),
+                worker_time_ms=(t1 - t0) * 1000.0,
+            ))
+        return results
 
     def _process_clusters_multiprocessing(
         self,
@@ -368,17 +455,15 @@ class QCAParallelEngine:
         log: List[str],
     ) -> List[ClusterProcessResult]:
         """
-        Executes parallel cluster steering using ProcessPoolExecutor.
+        Execute per-cluster steering using the persistent ProcessPoolExecutor.
+        The pool is created once at __init__ and reused, eliminating per-call
+        spawn overhead (~200-800 ms on Windows).
         """
         payloads = []
         for cluster in clusters:
             node_list = [
-                {
-                    "node_id": n.node_id,
-                    "coords": n.coords,
-                    "prime_profile": n.prime_profile,
-                    "metadata": n.metadata,
-                }
+                {"node_id": n.node_id, "coords": n.coords,
+                 "prime_profile": n.prime_profile, "metadata": n.metadata}
                 for n in cluster.nodes
             ]
             payloads.append({
@@ -393,27 +478,30 @@ class QCAParallelEngine:
                 "grammar_rules"  : grammar_rules or {},
             })
 
-        cluster_results_dict: Dict[int, ClusterProcessResult] = {}
+        pool = self._process_pool
+        if pool is None:  # fallback: per-call (shouldn't happen)
+            ctx = __import__('concurrent.futures', fromlist=['ProcessPoolExecutor'])
+            pool = ProcessPoolExecutor(max_workers=self.n_workers, initializer=_worker_initializer)
 
-        with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
-            futures = {executor.submit(_worker_process_cluster, p): p["cluster_id"] for p in payloads}
-            for future in as_completed(futures):
-                cid = futures[future]
-                res_data = future.result()
-                c_res = ClusterProcessResult(
-                    cluster_id=res_data["cluster_id"],
-                    node_ids=res_data["node_ids"],
-                    actualized_tokens=res_data["actualized_tokens"],
-                    trace_drifts=res_data["trace_drifts"],
-                    valuations=res_data["valuations"],
-                    actualized_flags=res_data["actualized_flags"],
-                    mean_drift=res_data["mean_drift"],
-                    mean_valuation=res_data["mean_valuation"],
-                    actualized_count=res_data["actualized_count"],
-                    worker_time_ms=res_data["worker_time_ms"],
-                )
-                cluster_results_dict[cid] = c_res
-                log.append(f"  Cluster {cid}: processed {len(c_res.node_ids)} nodes in {c_res.worker_time_ms:.2f} ms (mean val={c_res.mean_valuation:.4f})")
+        cluster_results_dict: Dict[int, ClusterProcessResult] = {}
+        futures = {pool.submit(_worker_process_cluster, p): p["cluster_id"] for p in payloads}
+        for future in as_completed(futures):
+            cid = futures[future]
+            res_data = future.result()
+            c_res = ClusterProcessResult(
+                cluster_id=res_data["cluster_id"],
+                node_ids=res_data["node_ids"],
+                actualized_tokens=res_data["actualized_tokens"],
+                trace_drifts=res_data["trace_drifts"],
+                valuations=res_data["valuations"],
+                actualized_flags=res_data["actualized_flags"],
+                mean_drift=res_data["mean_drift"],
+                mean_valuation=res_data["mean_valuation"],
+                actualized_count=res_data["actualized_count"],
+                worker_time_ms=res_data["worker_time_ms"],
+            )
+            cluster_results_dict[cid] = c_res
+            log.append(f"  Cluster {cid}: {len(c_res.node_ids)} nodes in {c_res.worker_time_ms:.2f}ms")
 
         return [cluster_results_dict[c.cluster_id] for c in clusters if c.cluster_id in cluster_results_dict]
 
@@ -428,21 +516,18 @@ class QCAParallelEngine:
         verbose: bool = False,
     ) -> QCAParallelResult:
         """
-        Execute QCA clustering, parallel cluster solving (Processes or JAX), and final synthesis.
+        Execute QCA clustering, parallel cluster solving, and final synthesis.
+        Backend priority: threads > jax > processes (set at __init__).
         """
+
         t_start = time.perf_counter()
         log: List[str] = []
-
-        # Determine actual backend to use
-        effective_backend = self.backend
-        if effective_backend == "auto":
-            effective_backend = "jax" if HAS_JAX else "processes"
+        effective_backend = self._effective_backend  # resolved once at __init__
 
         log.append(
-            f"[QCA_Parallel_Engine] Starting run: N={len(nodes)} nodes, K={self.K} clusters, "
-            f"backend='{effective_backend}' (JAX available: {HAS_JAX})"
+            f"[QCA_Parallel_Engine] N={len(nodes)} nodes, K={self.K} clusters, "
+            f"backend='{effective_backend}' (JAX={HAS_JAX})"
         )
-
         # Step 1: QCA Crystallization
         t_qca_0 = time.perf_counter()
         qca_res = self.qca.run(nodes)
@@ -454,12 +539,12 @@ class QCAParallelEngine:
         t_par_0 = time.perf_counter()
         if effective_backend == "jax":
             sorted_cluster_results = self._process_clusters_jax(qca_res.clusters, grammar_rules)
-        else:
+        elif effective_backend == "processes":
             sorted_cluster_results = self._process_clusters_multiprocessing(qca_res.clusters, grammar_rules, log)
+        else:  # "threads" (default)
+            sorted_cluster_results = self._process_clusters_threads(qca_res.clusters, grammar_rules)
         t_par_1 = time.perf_counter()
         par_ms  = (t_par_1 - t_par_0) * 1000.0
-
-        # Step 3: Final Synthesis Pass
         t_syn_0 = time.perf_counter()
 
         meta_logits = [0.0] * self.vocab_size

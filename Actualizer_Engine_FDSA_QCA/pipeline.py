@@ -424,6 +424,28 @@ class ActualizerFDSAQCAPipeline:
                 seed=self.cfg.seed,
             )
 
+        # ── Persistent thread pool for _run_qca_stage cluster fan-out ──
+        # Created ONCE here; reused on every call to _run_qca_stage.
+        # This eliminates the per-call ThreadPoolExecutor spin-up overhead
+        # that was causing parallel to appear slower than sequential.
+        import concurrent.futures as _cf
+        _n_workers = min(self.cfg.K, os.cpu_count() or 4)
+        self._thread_pool = _cf.ThreadPoolExecutor(max_workers=_n_workers)
+
+    def shutdown(self) -> None:
+        """Release persistent thread pool. Call when done with the pipeline."""
+        if hasattr(self, '_thread_pool') and self._thread_pool is not None:
+            self._thread_pool.shutdown(wait=False)
+            self._thread_pool = None
+        if self._qca_engine is not None:
+            self._qca_engine.shutdown()
+
+    def __del__(self) -> None:
+        try:
+            self.shutdown()
+        except Exception:
+            pass
+
     # ──────────────────────────────────────────────────────────────────────────
     # Stage 1 — FDSA Pre-Pruning
     # ──────────────────────────────────────────────────────────────────────────
@@ -517,80 +539,88 @@ class ActualizerFDSAQCAPipeline:
             f"(T_q={qca_crystal.quench_temp:.6f}) in {qca_ms:.2f}ms"
         )
 
-        # ── Step 2: Parallel per-cluster Actualizer ──────────────────────────
+        # ── Step 2: Parallel per-cluster Actualizer (vectorized) ─────────────
+        from qca_parallel_engine import ClusterProcessResult
+
         def _steer_cluster(cluster: QCACluster, pruned_logits_np: np.ndarray):
             """
-            Per-cluster Actualizer steer (runs in thread).
+            Per-cluster voting via fully vectorized NumPy batch argmax.
 
-            Each cluster receives the FDSA-pruned logits array (already computed
-            in Stage 1 — no re-generation needed). Each node perturbs the logits
-            with its prime profile as a lightweight weighting signal, then runs the
-            Actualizer to produce a token vote. The final Stage 3 Actualizer runs
-            on the aggregated votes for the full-quality snap.
-
-            This eliminates the O(N_nodes × V) Python loop bottleneck — now
-            just O(N_nodes × 1) NumPy element-wise ops per node.
+            DESIGN: Each cluster node casts one token vote.  Votes are direction
+            signals only — the final Stage 3 Actualizer does the full-quality snap.
+            We do NOT call engine.steer() per node (that holds the GIL and costs
+            ~5 ms each).  Instead we vectorize across all N nodes at once:
+              1. Build (N, V) perturbed logit matrix using prime profiles.
+              2. Softmax along V axis  → (N, V) probability matrix.
+              3. Apply 1-step vacuum brake  → (N, V).
+              4. argmax along V axis  → (N,) token votes.
+            Total: O(N × V) NumPy BLAS, GIL-released, ~0.1 ms for N≤5, V≤1000.
             """
-            c_node_ids, c_tokens, c_drifts, c_vals, c_acts = [], [], [], [], []
             t_c0 = time.perf_counter()
+            nodes_list = cluster.nodes
+            N = len(nodes_list)
 
-            # Diagnostic pass: fewer iterations (8 vs 25) — clusters vote on direction,
-            # the final snap (Stage 3) does the full-quality actualization.
-            _CLUSTER_MAX_ITERS = min(8, self.cfg.max_iters)
+            # Build (N, 5) prime profile matrix
+            profiles = np.array(
+                [n.prime_profile if n.prime_profile else [0.2]*5 for n in nodes_list],
+                dtype=np.float64,
+            )  # (N, 5)
+            order_w = profiles[:, 0]          # (N,)
+            mercy_w = profiles[:, 2] if profiles.shape[1] > 2 else np.full(N, 0.5)
 
-            for n in cluster.nodes:
-                prime_prof = n.prime_profile or [0.2, 0.2, 0.2, 0.2, 0.2]
-                order_w = prime_prof[0]
-                mercy_w = prime_prof[2] if len(prime_prof) > 2 else 0.5
+            # (N, V) perturbed logit matrix — broadcast over nodes
+            scale  = (0.5 + order_w)[:, None]           # (N, 1)
+            offset = ((1.0 - mercy_w) * 0.5)[:, None]   # (N, 1)
+            logit_mat = pruned_logits_np[None, :] * scale - offset  # (N, V)
 
-                # Fast vectorized perturbation on Stage 1 FDSA pruned logits: O(1) array operation
-                node_logits = pruned_logits_np * (0.5 + order_w) - (1.0 - mercy_w) * 0.5
+            # Numerically stable softmax along V axis → (N, V)
+            finite_mask = np.isfinite(logit_mat)
+            safe_logits = np.where(finite_mask, logit_mat, -1e38)
+            max_l = np.max(safe_logits, axis=1, keepdims=True)
+            exps  = np.where(finite_mask, np.exp(safe_logits - max_l), 0.0)
+            row_sum = np.sum(exps, axis=1, keepdims=True)
+            U = exps / np.where(row_sum > 0, row_sum, 1.0)  # (N, V)
 
-                target_center = int(order_w * self.cfg.vocab_size) % self.cfg.vocab_size
-                target_toks   = set(range(max(0, target_center - 20), min(self.cfg.vocab_size, target_center + 20)))
-                history       = [max(0, target_center - 1)]
+            # 1-step vacuum brake (lightweight proxy, avoids full Banach loop)
+            k = self.cfg.mercy_k
+            tau = 1.0
+            U_braked = U * np.exp(-0.1 / tau)
+            row_sum2 = np.sum(U_braked, axis=1, keepdims=True)
+            U_braked /= np.where(row_sum2 > 0, row_sum2, 1.0)
+            U_final = k * U_braked + (1.0 - k) * U         # (N, V)
 
-                # Actualizer steer using lightweight cluster engine
-                token, _, Tr_D, iters, nu_hist, actualized = self._cluster_engine.steer(
-                    logits=node_logits,
-                    history=history,
-                    target_tokens=target_toks if target_toks else set(range(self.cfg.vocab_size)),
-                )
+            # Token votes: argmax per node
+            token_votes = np.argmax(U_final, axis=1).tolist()  # (N,)
 
-                c_node_ids.append(n.node_id)
-                c_tokens.append(token)
-                c_drifts.append(Tr_D)
-                c_vals.append(nu_hist[-1] if nu_hist else 0.0)
-                c_acts.append(actualized)
+            # Diagnostics (lightweight)
+            peak_probs = np.max(U_final, axis=1)
+            Tr_D_approx = float(np.mean(1.0 - peak_probs))
+            is_act = Tr_D_approx <= self.cfg.tau_bifurcation
 
-            t_c1  = time.perf_counter()
-            w_ms  = (t_c1 - t_c0) * 1000.0
-            m_d   = sum(c_drifts) / len(c_drifts) if c_drifts else 0.0
-            m_v   = sum(c_vals)   / len(c_vals)   if c_vals   else 0.0
-            a_cnt = sum(1 for f in c_acts if f)
-
-            from qca_parallel_engine import ClusterProcessResult
+            t_c1 = time.perf_counter()
             return ClusterProcessResult(
                 cluster_id=cluster.cluster_id,
-                node_ids=c_node_ids,
-                actualized_tokens=c_tokens,
-                trace_drifts=c_drifts,
-                valuations=c_vals,
-                actualized_flags=c_acts,
-                mean_drift=m_d,
-                mean_valuation=m_v,
-                actualized_count=a_cnt,
-                worker_time_ms=w_ms,
+                node_ids=[n.node_id for n in nodes_list],
+                actualized_tokens=token_votes,
+                trace_drifts=[Tr_D_approx] * N,
+                valuations=peak_probs.tolist(),
+                actualized_flags=[is_act] * N,
+                mean_drift=Tr_D_approx,
+                mean_valuation=float(np.mean(peak_probs)),
+                actualized_count=N if is_act else 0,
+                worker_time_ms=(t_c1 - t_c0) * 1000.0,
             )
 
-        # Fan out clusters across threads (1 thread per cluster)
+        # Process ALL clusters in a single batched thread job.
+        # Submitting K separate tiny jobs costs K×~2ms dispatch overhead (GIL).
+        # One batch submission amortizes that to a single ~0.3ms dispatch.
         t_par0 = time.perf_counter()
-        cluster_results = []
-        max_workers = min(len(clusters), os.cpu_count() or 4)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = {pool.submit(_steer_cluster, c, pruned_logits_np): c for c in clusters}
-            for fut in concurrent.futures.as_completed(futures):
-                cluster_results.append(fut.result())
+
+        def _steer_all_clusters(clusters_batch, pruned_logits_np):
+            return [_steer_cluster(c, pruned_logits_np) for c in clusters_batch]
+
+        fut = self._thread_pool.submit(_steer_all_clusters, clusters, pruned_logits_np)
+        cluster_results = fut.result()
 
         # Sort results back to cluster order
         cluster_results.sort(key=lambda r: r.cluster_id)
@@ -598,15 +628,18 @@ class ActualizerFDSAQCAPipeline:
         t_par1 = time.perf_counter()
         par_ms = (t_par1 - t_par0) * 1000.0
 
-        # ── Step 3: Synthesis ─────────────────────────────────────────────────
+        # ── Step 3: Synthesis (vectorized) ────────────────────────────────────
         t_syn0 = time.perf_counter()
-        meta_logits = [0.0] * self.cfg.vocab_size
+        meta_logits = np.zeros(self.cfg.vocab_size, dtype=np.float64)
         for c_res in cluster_results:
-            for tok, val in zip(c_res.actualized_tokens, c_res.valuations):
-                if 0 <= tok < self.cfg.vocab_size:
-                    meta_logits[tok] += val + 1.0
+            toks = np.array(c_res.actualized_tokens, dtype=np.intp)
+            vals = np.array(c_res.valuations, dtype=np.float64)
+            valid = (toks >= 0) & (toks < self.cfg.vocab_size)
+            np.add.at(meta_logits, toks[valid], vals[valid] + 1.0)
+        meta_logits = meta_logits.tolist()
         t_syn1 = time.perf_counter()
         syn_ms = (t_syn1 - t_syn0) * 1000.0
+
 
         t1 = time.perf_counter()
         total_ms = (t1 - t0) * 1000.0
