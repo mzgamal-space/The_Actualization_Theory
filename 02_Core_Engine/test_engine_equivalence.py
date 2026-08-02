@@ -363,6 +363,54 @@ def main():
           f"{len(fork_warnings)} fork warning(s) in main process")
 
     # -----------------------------------------------------------------------
+    section("5. QCA PARALLEL ENGINE PERFORMANCE (persistent pool + cached vmap)")
+    # -----------------------------------------------------------------------
+    # Regression guard for Bugs A and C (see CHANGELOG_ENGINE_FIXES.md #10):
+    # both bugs had the same signature -- an expensive resource (process pool
+    # / jit+vmap function) rebuilt on every call instead of cached. The
+    # tell-tale sign of EITHER bug recurring is a FLAT per-call cost with no
+    # "expensive first call, cheap afterward" shape. These checks assert that
+    # shape directly, so a future edit that reintroduces per-call rebuilding
+    # fails loudly here instead of silently regressing performance.
+    perf_nodes = [QCANode(node_id=i, coords=[float(i % 5), float((i * 3) % 7)],
+                           prime_profile=[0.2] * 5, metadata={}) for i in range(50)]
+
+    engine_pool = QCAParallelEngine(K=5, vocab_size=2000, backend="processes", n_workers=5)
+    pool_call_times = []
+    for _ in range(3):
+        t0 = time.perf_counter()
+        engine_pool.process_parallel(perf_nodes, verbose=False)
+        pool_call_times.append(time.perf_counter() - t0)
+    engine_pool.shutdown_pool()
+
+    check("Persistent pool: call 2 is meaningfully faster than call 1 (pool reuse confirmed)",
+          pool_call_times[1] < pool_call_times[0] * 0.5,
+          f"call1={pool_call_times[0]*1000:.1f}ms call2={pool_call_times[1]*1000:.1f}ms")
+    check("Persistent pool: call 3 stays fast (steady state, not a one-off)",
+          pool_call_times[2] < pool_call_times[0] * 0.5,
+          f"call1={pool_call_times[0]*1000:.1f}ms call3={pool_call_times[2]*1000:.1f}ms")
+
+    engine_jax_perf = QCAParallelEngine(K=5, vocab_size=2000, backend="jax")
+    jax_call_times = []
+    for _ in range(3):
+        t0 = time.perf_counter()
+        engine_jax_perf.process_parallel(perf_nodes, verbose=False)
+        jax_call_times.append(time.perf_counter() - t0)
+
+    check("Cached vmap: call 2 is meaningfully faster than call 1 (JIT cache reuse confirmed)",
+          jax_call_times[1] < jax_call_times[0] * 0.5,
+          f"call1={jax_call_times[0]*1000:.1f}ms call2={jax_call_times[1]*1000:.1f}ms")
+    check("Cached vmap: call 3 stays fast (steady state, not a one-off)",
+          jax_call_times[2] < jax_call_times[0] * 0.5,
+          f"call1={jax_call_times[0]*1000:.1f}ms call3={jax_call_times[2]*1000:.1f}ms")
+
+    print("  NOTE: absolute ms values are hardware-dependent and will differ")
+    print("  from the CHANGELOG's reported numbers -- these checks assert the")
+    print("  SHAPE of the timing (fast after warm-up), not specific values.")
+    print("  See CHANGELOG_ENGINE_FIXES.md #10 for the scale-dependent")
+    print("  recommendation (sequential vs vmap-JAX) -- not re-derived here.")
+
+    # -----------------------------------------------------------------------
     section("SUMMARY")
     # -----------------------------------------------------------------------
     n_pass = sum(1 for _, s, _ in results if s == PASS)

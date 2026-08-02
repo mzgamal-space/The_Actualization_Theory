@@ -144,6 +144,10 @@ class PipelineConfig:
     prime_weights : Optional[dict]
         Domain-specific drift weights {Order, Justice, Knowledge, Mercy}.
         None = use ActualizerEngine defaults.
+    cluster_steering_mode : str
+        QCA cluster steering mode. "fast" = vectorized 3-step drift-aware
+        Banach iteration (default). "full" = per-node engine.steer() with
+        full Banach convergence loop (more accurate, slower).
     """
     vocab_size:      int            = 1000
     mercy_k:         float          = 0.45
@@ -159,6 +163,7 @@ class PipelineConfig:
     seed:            Optional[int]  = 42
     verbose:         bool           = False
     prime_weights:   Optional[Dict[str, float]] = None
+    cluster_steering_mode: str = "fast"    # "fast" (vectorized 3-step) | "full" (per-node engine.steer)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -513,6 +518,8 @@ class ActualizerFDSAQCAPipeline:
         nodes: List[QCANode],
         pruned_logits_np: np.ndarray,
         log: List[str],
+        context_ids: Optional[List[int]] = None,
+        target_tokens: Optional[Set[int]] = None,
     ) -> Tuple[Optional[QCAParallelResult], List[float]]:
         """
         Execute QCA clustering + parallel per-cluster FDSA+Actualization.
@@ -581,46 +588,128 @@ class ActualizerFDSAQCAPipeline:
             row_sum = np.sum(exps, axis=1, keepdims=True)
             U = exps / np.where(row_sum > 0, row_sum, 1.0)  # (N, V)
 
-            # 1-step vacuum brake (lightweight proxy, avoids full Banach loop)
+            # ── Drift-aware multi-step Banach iteration (fast mode) ──────
             k = self.cfg.mercy_k
-            tau = 1.0
-            U_braked = U * np.exp(-0.1 / tau)
-            row_sum2 = np.sum(U_braked, axis=1, keepdims=True)
-            U_braked /= np.where(row_sum2 > 0, row_sum2, 1.0)
-            U_final = k * U_braked + (1.0 - k) * U         # (N, V)
+            tau = self.cfg.tau
+            w_F = 0.20   # Future drift weight (per actualizer_engine.py)
+
+            for _step in range(3):
+                # Per-token future drift: D_future(v) = |log(U(v)) + 1.0|
+                # Shannon entropy gradient (Actualizer_Engine_Theory §3.2)
+                D_future = np.abs(np.log(np.maximum(U, 1e-12)) + 1.0)
+                D = w_F * D_future
+
+                # Vacuum Brake: U_braked = U · exp(-D/τ) / Z
+                U_braked = U * np.exp(-D / tau)
+                U_braked = np.where(finite_mask, U_braked, 0.0)
+                row_sum_b = np.sum(U_braked, axis=1, keepdims=True)
+                U_braked /= np.where(row_sum_b > 0, row_sum_b, 1.0)
+
+                # Banach contraction: U_{n+1} = k · U_braked + (1-k) · U_n
+                U = k * U_braked + (1.0 - k) * U
 
             # Token votes: argmax per node
-            token_votes = np.argmax(U_final, axis=1).tolist()  # (N,)
+            token_votes = np.argmax(U, axis=1).tolist()
 
-            # Diagnostics (lightweight)
-            peak_probs = np.max(U_final, axis=1)
-            Tr_D_approx = float(np.mean(1.0 - peak_probs))
-            is_act = Tr_D_approx <= self.cfg.tau_bifurcation
+            # Diagnostics: proper Tr(D_μν) = Σ_v U(v) · D(v) per node
+            D_final = w_F * np.abs(np.log(np.maximum(U, 1e-12)) + 1.0)
+            Tr_D_per_node = np.sum(U * D_final, axis=1)
+            peak_probs = np.max(U, axis=1)
+            mean_Tr_D = float(np.mean(Tr_D_per_node))
+            is_act = mean_Tr_D <= self.cfg.tau_bifurcation
 
             t_c1 = time.perf_counter()
             return ClusterProcessResult(
                 cluster_id=cluster.cluster_id,
                 node_ids=[n.node_id for n in nodes_list],
                 actualized_tokens=token_votes,
-                trace_drifts=[Tr_D_approx] * N,
+                trace_drifts=Tr_D_per_node.tolist(),
                 valuations=peak_probs.tolist(),
                 actualized_flags=[is_act] * N,
-                mean_drift=Tr_D_approx,
+                mean_drift=mean_Tr_D,
                 mean_valuation=float(np.mean(peak_probs)),
                 actualized_count=N if is_act else 0,
                 worker_time_ms=(t_c1 - t_c0) * 1000.0,
             )
 
-        # Process ALL clusters in a single batched thread job.
-        # Submitting K separate tiny jobs costs K×~2ms dispatch overhead (GIL).
-        # One batch submission amortizes that to a single ~0.3ms dispatch.
+        def _steer_cluster_full(cluster: QCACluster, pruned_logits_np: np.ndarray):
+            """
+            Per-cluster voting via full per-node Actualizer engine steering.
+
+            Uses the lightweight cluster engine (max_iters=8) for each node,
+            running full Banach contractive iteration with Prime coordinate
+            evaluation and proper drift tensor computation.
+            More accurate than fast mode but slower (~5ms per node).
+            """
+            t_c0 = time.perf_counter()
+            nodes_list = cluster.nodes
+            N = len(nodes_list)
+
+            token_votes = []
+            trace_drifts_list = []
+            valuations_list = []
+            actualized_flags_list = []
+
+            history = list(context_ids[-8:]) if context_ids else [0]
+            tgt = target_tokens if target_tokens else set(range(self.cfg.vocab_size))
+
+            for node in nodes_list:
+                profile = node.prime_profile if node.prime_profile else [0.2] * 5
+                order_w = profile[0]
+                mercy_w = profile[2] if len(profile) > 2 else 0.5
+
+                # Per-node prime-profile perturbation on pruned logits
+                scale = 0.5 + order_w
+                offset = (1.0 - mercy_w) * 0.5
+                node_logits = pruned_logits_np * scale - offset
+
+                # Full Banach contractive steering via cluster engine
+                token, U_f, Tr_D, iters, nu_hist, is_act = self._cluster_engine.steer(
+                    logits=node_logits,
+                    history=history,
+                    target_tokens=tgt,
+                )
+
+                token_votes.append(token)
+                trace_drifts_list.append(Tr_D)
+                valuations_list.append(nu_hist[-1] if nu_hist else 0.0)
+                actualized_flags_list.append(is_act)
+
+            mean_drift = sum(trace_drifts_list) / N if N > 0 else 0.0
+            mean_val = sum(valuations_list) / N if N > 0 else 0.0
+            act_count = sum(1 for f in actualized_flags_list if f)
+
+            t_c1 = time.perf_counter()
+            return ClusterProcessResult(
+                cluster_id=cluster.cluster_id,
+                node_ids=[n.node_id for n in nodes_list],
+                actualized_tokens=token_votes,
+                trace_drifts=trace_drifts_list,
+                valuations=valuations_list,
+                actualized_flags=actualized_flags_list,
+                mean_drift=mean_drift,
+                mean_valuation=mean_val,
+                actualized_count=act_count,
+                worker_time_ms=(t_c1 - t_c0) * 1000.0,
+            )
+
+        # ── Cluster dispatch: select steering mode and process ────────────
         t_par0 = time.perf_counter()
 
-        def _steer_all_clusters(clusters_batch, pruned_logits_np):
-            return [_steer_cluster(c, pruned_logits_np) for c in clusters_batch]
+        if self.cfg.cluster_steering_mode == "full":
+            # Full mode: sequential (GIL-bound per-node engine.steer)
+            cluster_results = [
+                _steer_cluster_full(c, pruned_logits_np) for c in clusters
+            ]
+        else:
+            # Fast mode: threaded batch (GIL-released NumPy BLAS)
+            def _steer_all_clusters(clusters_batch, pruned_logits_np):
+                return [_steer_cluster(c, pruned_logits_np) for c in clusters_batch]
 
-        fut = self._thread_pool.submit(_steer_all_clusters, clusters, pruned_logits_np)
-        cluster_results = fut.result()
+            fut = self._thread_pool.submit(
+                _steer_all_clusters, clusters, pruned_logits_np
+            )
+            cluster_results = fut.result()
 
         # Sort results back to cluster order
         cluster_results.sort(key=lambda r: r.cluster_id)
@@ -889,60 +978,69 @@ class ActualizerFDSAQCAPipeline:
         if logits is None:
             logits = self.attention.get_logits(context_ids, step=step)
 
-        # ── Stage 1: Actualizer Engine Steering (on raw logits) ───────────────
+        # ── Stage 1: FDSA Pre-Inference Pruning (domain-based threshold) ──────
+        # FDSA uses isomorphic anchoring to match context to a reference domain
+        # (Resistor Equilibrium / Fermat Least Time / Cellular Homeostasis),
+        # inheriting domain-specific k_ref → fractal dimension D → threshold.
+        # Canonical Ordering (Theorem 2.1): FDSA MUST precede Actualization.
+        fdsa_result = self._run_fdsa_stage(logits, last_token, log)
+
+        # Derive target tokens from FDSA-surviving active candidates
         if target_tokens is None:
-            # Derive target tokens from top-50 raw logit candidates
-            top_50_idx = np.argsort(logits)[::-1][:50]
-            target_tokens = set(top_50_idx)
-
-        qca_result: Optional[QCAParallelResult] = None
-
-        if self.cfg.execution_mode == "parallel" and self._qca_engine is not None:
-            # --- PARALLEL PATH (QCA Steering -> FDSA Prune) ---
-            N_nodes = self.cfg.K * 2 + 1
-            nodes = self._build_qca_nodes(logits, context_ids, N_nodes)
-            log.append(f"[Stage 1 — QCA] Building {len(nodes)} nodes from raw logits")
-
-            qca_result, meta_logits = self._run_qca_stage(
-                nodes,
-                np.array(logits, dtype=np.float64),
-                log,
+            pruned_np = np.array(fdsa_result.pruned_logits, dtype=np.float64)
+            active_mask = np.isfinite(pruned_np)
+            active_indices = np.where(active_mask)[0]
+            if len(active_indices) > 50:
+                sorted_active = active_indices[
+                    np.argsort(pruned_np[active_indices])[::-1][:50]
+                ]
+            else:
+                sorted_active = active_indices
+            target_tokens = (
+                set(sorted_active.tolist()) if len(sorted_active) > 0 else {0}
             )
 
-            steered_logits = [
-                (logits[i] + meta_logits[i])
-                for i in range(self.cfg.vocab_size)
-            ]
-        else:
-            # --- SEQUENTIAL PATH (Actualizer Steering -> FDSA Prune) ---
-            log.append("[Stage 1 — Actualizer] Steering raw logits")
-            steered_logits = logits
+        qca_result: Optional[QCAParallelResult] = None
+        pruned_np = np.array(fdsa_result.pruned_logits, dtype=np.float64)
 
-        # Run Actualizer Steering Pass
+        if self.cfg.execution_mode == "parallel" and self._qca_engine is not None:
+            # ── PARALLEL PATH: FDSA → QCA Clustering → Actualizer ─────────
+            N_nodes = self.cfg.K * 2 + 1
+            nodes = self._build_qca_nodes(
+                fdsa_result.pruned_logits, context_ids, N_nodes
+            )
+            log.append(
+                f"[Stage 2 — QCA] Building {len(nodes)} nodes from "
+                f"FDSA-pruned logits (active={fdsa_result.active_count})"
+            )
+
+            qca_result, meta_logits = self._run_qca_stage(
+                nodes, pruned_np, log,
+                context_ids=context_ids,
+                target_tokens=target_tokens,
+            )
+
+            # Merge QCA meta_logits into FDSA-pruned logits.
+            # Preserve -inf for dead tokens so Actualizer never sees them.
+            meta_np = np.array(meta_logits, dtype=np.float64)
+            steered_logits = np.where(
+                np.isfinite(pruned_np),
+                pruned_np + meta_np,
+                float('-inf'),
+            ).tolist()
+        else:
+            # ── SEQUENTIAL PATH: FDSA → Actualizer ────────────────────────
+            steered_logits = fdsa_result.pruned_logits
+
+        # ── Stage 3: Actualizer Final Snap (on pruned/steered logits) ─────
+        # Operates on M << V active tokens (Theorem 2.1 canonical ordering).
+        # Causal Snap gated by Tr(D_μν) ≤ τ_bifurcation (Theorem 3.3).
         act_result = self._run_actualizer_stage(
             logits_to_steer=steered_logits,
             context_ids=context_ids,
             target_tokens=target_tokens,
             log=log,
         )
-
-        # ── Stage 2: FDSA Pruning (on Actualizer-steered distribution) ───────
-        # Convert actualized U_final back to log scale logits for FDSA pruning
-        u_arr = np.array(act_result.U_final, dtype=np.float64)
-        u_arr = np.maximum(u_arr, 1e-12)
-        steered_logits_for_fdsa = np.log(u_arr).tolist()
-
-        fdsa_result = self._run_fdsa_stage(steered_logits_for_fdsa, last_token, log)
-
-        # ── Stage 3: Causal Snap ──────────────────────────────────────────────
-        # Select argmax from FDSA-pruned steered logits, gated by Tr(D) <= tau
-        active_pruned_np = np.array(fdsa_result.pruned_logits, dtype=np.float64)
-        if act_result.is_actualized and np.any(np.isfinite(active_pruned_np)):
-            final_token = int(np.nanargmax(active_pruned_np))
-        else:
-            final_token = act_result.final_token
-
-        act_result.final_token = final_token
 
         t_end = time.perf_counter()
         total_ms = (t_end - t_start) * 1000.0
@@ -1010,6 +1108,7 @@ def create_sequential_pipeline(
     vocab_size: int = 1000,
     mercy_k: float = 0.45,
     context_type: str = "logical_coding",
+    grammar_rules: Optional[Dict[int, Set[int]]] = None,
     verbose: bool = False,
     attention_engine: Optional[AttentionEngineInterface] = None,
 ) -> ActualizerFDSAQCAPipeline:
@@ -1028,7 +1127,7 @@ def create_sequential_pipeline(
         execution_mode="sequential",
         verbose=verbose,
     )
-    return ActualizerFDSAQCAPipeline(config=cfg, attention_engine=attention_engine)
+    return ActualizerFDSAQCAPipeline(config=cfg, attention_engine=attention_engine, grammar_rules=grammar_rules)
 
 
 def create_parallel_pipeline(
@@ -1037,6 +1136,7 @@ def create_parallel_pipeline(
     mercy_k: float = 0.45,
     backend: str = "auto",
     context_type: str = "logical_coding",
+    grammar_rules: Optional[Dict[int, Set[int]]] = None,
     verbose: bool = False,
     attention_engine: Optional[AttentionEngineInterface] = None,
     seed: int = 42,
@@ -1060,7 +1160,7 @@ def create_parallel_pipeline(
         verbose=verbose,
         seed=seed,
     )
-    return ActualizerFDSAQCAPipeline(config=cfg, attention_engine=attention_engine)
+    return ActualizerFDSAQCAPipeline(config=cfg, attention_engine=attention_engine, grammar_rules=grammar_rules)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

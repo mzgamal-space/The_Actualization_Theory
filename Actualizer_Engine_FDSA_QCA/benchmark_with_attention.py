@@ -652,6 +652,150 @@ def verify_canonical_ordering(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# B5: Pipeline-Level Ordering Test
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def verify_pipeline_ordering(
+    vocab_size: int = 500,
+    T_steps: int = 3,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Verify that pipeline.run() enforces correct stage ordering through
+    audit log inspection and result object validation.
+
+    Checks:
+      1. Audit log shows '[Stage 1 — FDSA]' BEFORE '[Stage 3 — Actualizer]'
+      2. FDSA actually pruned (pruning_ratio > 0)
+      3. Actualizer converged (is_actualized = True)
+      4. Actualizer iteration count is reasonable (benefit of reduced vocab)
+    """
+    if verbose:
+        print(f"\n{'='*70}")
+        print("  PIPELINE-LEVEL ORDERING VERIFICATION")
+        print(f"  V={vocab_size}, T={T_steps}")
+        print(f"{'='*70}")
+
+    attention = SimulatedAttentionEngine(vocab_size=vocab_size, seed=42)
+
+    # Create sequential pipeline (FDSA → Actualizer)
+    cfg_seq = PipelineConfig(
+        vocab_size=vocab_size, execution_mode="sequential",
+        K=4, seed=42, verbose=False,
+    )
+    pipe_seq = ActualizerFDSAQCAPipeline(config=cfg_seq, attention_engine=attention)
+
+    # Create parallel pipeline (FDSA → QCA → Actualizer)
+    cfg_par = PipelineConfig(
+        vocab_size=vocab_size, execution_mode="parallel",
+        K=4, seed=42, verbose=False,
+    )
+    pipe_par = ActualizerFDSAQCAPipeline(config=cfg_par, attention_engine=attention)
+
+    context_ids = [42, 17, 305]
+    results = {"sequential": [], "parallel": []}
+    all_passed = True
+
+    for step in range(T_steps):
+        # --- Sequential path ---
+        res_seq = pipe_seq.run(context_ids=context_ids, step=step)
+        log_seq = "\n".join(res_seq.audit_log)
+
+        # Check 1: audit log ordering
+        fdsa_pos = log_seq.find("Stage 1")
+        act_pos = log_seq.find("Stage 3")
+        log_order_ok = (fdsa_pos >= 0 and act_pos >= 0 and fdsa_pos < act_pos)
+
+        # Check 2: FDSA pruned something
+        pruning_ok = (
+            res_seq.fdsa_result is not None
+            and res_seq.fdsa_result.pruning_ratio > 0
+        )
+
+        # Check 3: Actualizer converged
+        actualized_ok = (
+            res_seq.act_result is not None
+            and res_seq.act_result.is_actualized
+        )
+
+        step_passed = log_order_ok and pruning_ok and actualized_ok
+        all_passed = all_passed and step_passed
+
+        results["sequential"].append({
+            "step": step,
+            "log_order_ok": log_order_ok,
+            "pruning_ratio": (
+                res_seq.fdsa_result.pruning_ratio if res_seq.fdsa_result else 0
+            ),
+            "actualized": actualized_ok,
+            "iterations": (
+                res_seq.act_result.iterations if res_seq.act_result else -1
+            ),
+            "passed": step_passed,
+        })
+
+        # --- Parallel path ---
+        res_par = pipe_par.run(context_ids=context_ids, step=step)
+        log_par = "\n".join(res_par.audit_log)
+
+        fdsa_pos_p = log_par.find("Stage 1")
+        qca_pos_p = log_par.find("Stage 2")
+        act_pos_p = log_par.find("Stage 3")
+        log_order_par = (
+            fdsa_pos_p >= 0 and qca_pos_p >= 0 and act_pos_p >= 0
+            and fdsa_pos_p < qca_pos_p < act_pos_p
+        )
+
+        pruning_par_ok = (
+            res_par.fdsa_result is not None
+            and res_par.fdsa_result.pruning_ratio > 0
+        )
+        actualized_par_ok = (
+            res_par.act_result is not None
+            and res_par.act_result.is_actualized
+        )
+
+        par_passed = log_order_par and pruning_par_ok and actualized_par_ok
+        all_passed = all_passed and par_passed
+
+        results["parallel"].append({
+            "step": step,
+            "log_order_ok": log_order_par,
+            "pruning_ratio": (
+                res_par.fdsa_result.pruning_ratio if res_par.fdsa_result else 0
+            ),
+            "actualized": actualized_par_ok,
+            "qca_clusters": (
+                len(res_par.parallel_result.cluster_results)
+                if res_par.parallel_result else 0
+            ),
+            "passed": par_passed,
+        })
+
+        context_ids.append(res_seq.final_token)
+        if len(context_ids) > 16:
+            context_ids = context_ids[-16:]
+
+    if verbose:
+        print("\n  Mode        | Step | LogOrder | Pruning  | Actualized | Result")
+        print("  " + "-" * 66)
+        for mode in ["sequential", "parallel"]:
+            for r in results[mode]:
+                status = "✓ PASS" if r["passed"] else "✗ FAIL"
+                print(
+                    f"  {mode:<12} | {r['step']:>4} | "
+                    f"{'✓' if r['log_order_ok'] else '✗':>8} | "
+                    f"{r['pruning_ratio']:>7.1%} | "
+                    f"{'✓' if r['actualized'] else '✗':>10} | "
+                    f"{status}"
+                )
+        overall = "✓ ALL PASSED" if all_passed else "✗ FAILURES DETECTED"
+        print(f"\n  Pipeline ordering verification: {overall}")
+
+    return {"all_passed": all_passed, "results": results}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Full Benchmark Entry Point
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -760,6 +904,13 @@ def run_full_benchmark(
 
     all_results["B4_context_types"] = b4_results
 
+    # ── B5: Pipeline-level ordering verification ─────────────────────────────
+    print("\n── B5: Pipeline-Level Ordering Verification ─────────────────────────")
+    b5_V = 300 if quick else 500
+    b5_T = 3 if quick else 5
+    b5 = verify_pipeline_ordering(vocab_size=b5_V, T_steps=b5_T, verbose=verbose)
+    all_results["B5_pipeline_ordering"] = b5
+
     # ── Summary Table ─────────────────────────────────────────────────────────
     if verbose:
         print(f"\n{'='*70}")
@@ -778,6 +929,9 @@ def run_full_benchmark(
         confirmed = b3r.get("theorem_2_1_confirmed", False)
         print(f"\n  B3 Theorem 2.1 (FDSA before ACT): {'CONFIRMED ✓' if confirmed else 'NOT CONFIRMED ✗'}")
         print(f"     Reversed/Correct latency ratio: {b3r.get('latency_ratio_reversed_over_correct', 'N/A')}x")
+        b5r = all_results.get("B5_pipeline_ordering", {})
+        b5_ok = b5r.get("all_passed", False)
+        print(f"\n  B5 Pipeline-level ordering: {'ALL PASSED ✓' if b5_ok else 'FAILURES DETECTED ✗'}")
         print(f"\n  Pipeline: Actualizer_Engine_FDSA_QCA v1.0.0")
         print(f"  Framework: CKT V3_U1 | DOI: 10.5281/zenodo.21420098")
         print(f"{'='*70}")

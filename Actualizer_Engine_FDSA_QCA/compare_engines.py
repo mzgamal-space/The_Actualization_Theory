@@ -1,5 +1,6 @@
 import sys, os, time
 
+
 def main():
     sys.stdout.reconfigure(encoding='utf-8')
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '02_Core_Engine'))
@@ -12,12 +13,13 @@ def main():
 
     print("=" * 80)
     print("  SIDE-BY-SIDE COMPARISON: pipeline.py vs qca_parallel_engine.py")
-    print("  Parameters: K=10 clusters, V=1000 vocab, N=120 nodes")
+    print("  Parameters: K=10 clusters, V=1000 vocab")
     print("=" * 80 + "\n")
 
     V = 1000
     K = 10
     seed = 42
+    N_VALUES = [21, 60, 120, 240]
 
     # ---------------------------------------------------------------------------
     # Test 1: pipeline.py (ActualizerFDSAQCAPipeline with ThreadPool)
@@ -36,8 +38,9 @@ def main():
 
     mean_pipe_ms = sum(pipe_times) / len(pipe_times)
     pr_p = res_pipe.parallel_result
+    pipe_N = sum(len(cr.node_ids) for cr in pr_p.cluster_results) if pr_p else 0
 
-    print("[1] pipeline.py Stage 2 (ThreadPool Backend):")
+    print(f"[1] pipeline.py Stage 2 (ThreadPool Backend, N={pipe_N} nodes):")
     print(f"    Total Stage 2 Latency  : {mean_pipe_ms:.2f} ms")
     print(f"    - QCA Crystallization  : {pr_p.qca_time_ms:.2f} ms")
     print(f"    - Parallel Execution   : {pr_p.parallel_time_ms:.2f} ms")
@@ -45,59 +48,86 @@ def main():
     print(f"    - Backend Used         : {pr_p.backend_used}")
 
     # ---------------------------------------------------------------------------
-    # Test 2: qca_parallel_engine.py (backend='processes')
+    # Test 2-3: qca_parallel_engine.py with multiple N values
     # ---------------------------------------------------------------------------
-    rng = random.Random(seed)
-    nodes_21 = []
-    for i in range(120):
-        coords = [rng.uniform(0, 10) for _ in range(5)]
-        prime_prof = [rng.uniform(0.1, 0.9) for _ in range(5)]
-        nodes_21.append(QCANode(node_id=i, coords=coords, prime_profile=prime_prof))
+    scaling_results = {}  # {N: {"processes": ms, "auto": ms}}
 
-    eng_proc = QCAParallelEngine(K=K, vocab_size=V, backend="processes", seed=seed)
-    eng_proc.process_parallel(nodes_21, verbose=False) # warm-up
+    for N in N_VALUES:
+        rng = random.Random(seed)
+        nodes = []
+        for i in range(N):
+            coords = [rng.uniform(0, 10) for _ in range(5)]
+            prime_prof = [rng.uniform(0.1, 0.9) for _ in range(5)]
+            nodes.append(QCANode(node_id=i, coords=coords, prime_profile=prime_prof))
 
-    proc_times = []
-    for _ in range(3):
-        res_proc = eng_proc.process_parallel(nodes_21, verbose=False)
-        proc_times.append(res_proc.total_time_ms)
-    mean_proc_ms = sum(proc_times) / len(proc_times)
+        scaling_results[N] = {}
 
-    print("\n[2] qca_parallel_engine.py (backend='processes'):")
-    print(f"    Total Engine Latency   : {mean_proc_ms:.2f} ms")
-    print(f"    - QCA Crystallization  : {res_proc.qca_time_ms:.2f} ms")
-    print(f"    - Parallel Execution   : {res_proc.parallel_time_ms:.2f} ms")
-    print(f"    - Synthesis Pass       : {res_proc.synthesis_time_ms:.2f} ms")
-    print(f"    - Backend Used         : {res_proc.backend_used}")
+        # Backend: processes
+        eng_proc = QCAParallelEngine(K=K, vocab_size=V, backend="processes", seed=seed)
+        eng_proc.process_parallel(nodes, verbose=False)  # warm-up
+
+        proc_times = []
+        for _ in range(3):
+            res_proc = eng_proc.process_parallel(nodes, verbose=False)
+            proc_times.append(res_proc.total_time_ms)
+        mean_proc_ms = sum(proc_times) / len(proc_times)
+        scaling_results[N]["processes"] = mean_proc_ms
+        scaling_results[N]["proc_backend"] = res_proc.backend_used
+
+        # Backend: auto/jax
+        eng_jax = QCAParallelEngine(K=K, vocab_size=V, backend="auto", seed=seed)
+        eng_jax.process_parallel(nodes, verbose=False)  # warm-up
+
+        jax_times = []
+        for _ in range(3):
+            res_jax = eng_jax.process_parallel(nodes, verbose=False)
+            jax_times.append(res_jax.total_time_ms)
+        mean_jax_ms = sum(jax_times) / len(jax_times)
+        scaling_results[N]["auto"] = mean_jax_ms
+        scaling_results[N]["auto_backend"] = res_jax.backend_used
+
+    # Print per-backend detail for last N value (240) for detailed breakdown
+    last_N = N_VALUES[-1]
+    print(f"\n[2] qca_parallel_engine.py (backend='processes', N={last_N}):")
+    print(f"    Total Engine Latency   : {scaling_results[last_N]['processes']:.2f} ms")
+    print(f"    - Backend Used         : {scaling_results[last_N]['proc_backend']}")
+
+    print(f"\n[3] qca_parallel_engine.py (backend='auto', N={last_N}):")
+    print(f"    Total Engine Latency   : {scaling_results[last_N]['auto']:.2f} ms")
+    print(f"    - Backend Used         : {scaling_results[last_N]['auto_backend']}")
 
     # ---------------------------------------------------------------------------
-    # Test 3: qca_parallel_engine.py (backend='auto/jax')
+    # Summary: Multi-N Scaling Comparison Table
     # ---------------------------------------------------------------------------
-    eng_jax = QCAParallelEngine(K=K, vocab_size=V, backend="auto", seed=seed)
-    eng_jax.process_parallel(nodes_21, verbose=False) # warm-up
-
-    jax_times = []
-    for _ in range(3):
-        res_jax = eng_jax.process_parallel(nodes_21, verbose=False)
-        jax_times.append(res_jax.total_time_ms)
-    mean_jax_ms = sum(jax_times) / len(jax_times)
-
-    print("\n[3] qca_parallel_engine.py (backend='auto/jax'):")
-    print(f"    Total Engine Latency   : {mean_jax_ms:.2f} ms")
-    print(f"    - QCA Crystallization  : {res_jax.qca_time_ms:.2f} ms")
-    print(f"    - Parallel Execution   : {res_jax.parallel_time_ms:.2f} ms")
-    print(f"    - Synthesis Pass       : {res_jax.synthesis_time_ms:.2f} ms")
-    print(f"    - Backend Used         : {res_jax.backend_used}")
-
     print("\n" + "=" * 80)
-    print("  SUMMARY COMPARISON TABLE (K=10 clusters, V=1000 vocab, N=21 nodes)")
+    print("  SCALING COMPARISON TABLE (K=10 clusters, V=1000 vocab)")
     print("=" * 80)
-    print(f"  {'Engine / Implementation':<38} | {'Latency (ms)':<14} | {'Speedup vs Process':<20}")
-    print("  " + "-" * 76)
-    print(f"  {'pipeline.py (ThreadPool)':<38} | {mean_pipe_ms:>10.2f} ms   | {mean_proc_ms / mean_pipe_ms:>16.2f}x")
-    print(f"  {'qca_parallel_engine.py (processes)':<38} | {mean_proc_ms:>10.2f} ms   | {1.00:>16.2f}x")
-    print(f"  {'qca_parallel_engine.py (auto/jax)':<38} | {mean_jax_ms:>10.2f} ms   | {mean_proc_ms / mean_jax_ms:>16.2f}x")
+    print(f"  {'N nodes':<10} | {'pipeline.py (threads)':<24} | {'Engine (processes)':<20} | {'Engine (auto/jax)':<20}")
+    print("  " + "-" * 78)
+
+    # pipeline.py runs at a fixed N determined by the pipeline config
+    for N in N_VALUES:
+        proc_ms = scaling_results[N]["processes"]
+        jax_ms = scaling_results[N]["auto"]
+        if N == pipe_N:
+            pipe_str = f"{mean_pipe_ms:>10.2f} ms"
+        else:
+            pipe_str = f"{'---':>10}"
+        print(
+            f"  {N:<10} | {pipe_str:>24} | {proc_ms:>16.2f} ms | {jax_ms:>16.2f} ms"
+        )
+
+    # Speedup comparison at matching N
+    print("\n  " + "=" * 78)
+    print(f"  {'SPEEDUP vs processes (N=' + str(N_VALUES[-1]) + ')':<38} | {'Ratio':<20}")
+    print("  " + "-" * 58)
+    ref_ms = scaling_results[N_VALUES[-1]]["processes"]
+    print(f"  {'pipeline.py (threads, N=' + str(pipe_N) + ')':<38} | {ref_ms / mean_pipe_ms:>16.2f}x")
+    for N in N_VALUES:
+        jax_ms = scaling_results[N]["auto"]
+        print(f"  {'Engine auto/jax (N=' + str(N) + ')':<38} | {ref_ms / jax_ms:>16.2f}x")
     print("=" * 80)
+
 
 if __name__ == '__main__':
     main()
