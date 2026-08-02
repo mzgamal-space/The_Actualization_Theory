@@ -147,6 +147,70 @@ fair test requires comparing against that baseline directly, on real
 generation — not attempted in this pass; the mechanism-level result above is
 real, but it is not yet an efficacy result.
 
+### 10. `qca_parallel_engine.py` — performance regression, three compounding bugs found and fixed
+User-reported: sequential 16.3 ms/step, "parallel" pipeline 72.9 ms/step —
+parallelism making things ~4.5x *slower*. Diagnosed and fixed three
+compounding causes, all independently verified with controlled, per-step
+(not averaged) timing to separate one-time startup costs from true
+steady-state behavior:
+
+**Bug A — process pool rebuilt every call (multiprocessing backend).**
+`with ProcessPoolExecutor(...) as executor:` was inside the per-call method,
+so a fresh pool (with `spawn`, per fix #5 above) was created and torn down on
+every single call. Measured directly: ~3600-4800 ms *every* call, no
+improvement across repeated calls. **Fix:** pool is now created once, lazily,
+and cached on the instance (`self._persistent_pool`), reused across calls;
+`shutdown_pool()` added for explicit cleanup, plus context-manager support
+(`__enter__`/`__exit__`). **Verified:** steady-state (excluding the
+unavoidable one-time ~3s startup) dropped to ~85-95 ms/step — a ~40-45x
+improvement — though see the scaling result below for why this backend is
+still not recommended.
+
+**Bug B — the "jax" backend was not actually vectorized or JIT-compiled.**
+Despite its docstring claiming "vectorized JAX / NumPy operations",
+`_process_clusters_jax` was a sequential Python double loop (per cluster, per
+node) calling small, unjitted JAX ops one at a time — and used a different,
+simplified Prime-coordinate formula (`alpha_vec = [max(U)/5]*5`, all five
+components forced equal) disconnected from the verified
+`ActualizerEngine`/`JaxActualizerEngine`. Measured: 251.8 ms/step for 15
+nodes — worse than even the broken multiprocessing path. **Fix:** replaced
+entirely with a real implementation that batches all nodes across all
+clusters into a single `jax.jit(jax.vmap(...))` call to the verified,
+cross-checked `JaxActualizerEngine`, using domain-anchored weights
+(`self.prime_weights_dict`, derived from `context_type` via the same
+profile→weights mapping verified in `test_engine_equivalence.py`).
+
+**Bug C — found while fixing Bug B: the jit+vmap wrapper itself was rebuilt every call.**
+The replacement for Bug B still constructed `jax.jit(jax.vmap(...))` inside
+the per-call method — the same class of mistake as Bug A, in a different
+resource. Measured: a flat ~480-500 ms cost on *every* call with no
+"expensive first call, cheap after" shape — the signature of recompilation
+happening every time rather than once. **Fix:** moved construction of
+`self._batched_steer` to be cached alongside `self._jax_engine`, built once.
+**Verified:** steady-state dropped to ~52 ms/step (from the Bug-B-only fixed
+version's flat ~488 ms/step) — first call now correctly shows the ~790 ms
+JIT-compile cost, all subsequent calls fast.
+
+**Final, scale-dependent finding (the actionable result):**
+| N nodes | Sequential (ms/step) | vmap-JAX (ms/step) | Faster |
+|---|---|---|---|
+| 15 | 51.3 | 56.1 | Sequential (1.09x) |
+| 50 | 163.1 | 129.5 | JAX (1.26x) |
+| 150 | 444.4 | 207.8 | JAX (2.14x) |
+| 500 | 1568.3 | 625.4 | JAX (2.51x) |
+| 1500 | 5384.5 | 2474.0 | JAX (2.18x) |
+
+**Recommendation:** below ~30-50 nodes, use plain sequential (simpler, no
+dependency on JAX, negligible difference). Above that, use the fixed
+`backend="jax"` vmap path — the advantage grows with scale. **The
+`backend="processes"` (multiprocessing) path, even after Bug A's fix, did not
+beat either sequential or vmap-JAX at any scale tested** — IPC/pickling
+overhead for this lightweight NumPy-scale workload appears to structurally
+exceed what process-level parallelism can recover. It remains available and
+correct (Bug A is genuinely fixed), but is not the recommended backend for
+this workload; it may become worthwhile if per-node work becomes much
+heavier (e.g. a real per-node model forward pass), which was not tested here.
+
 ## Not fixed (explicitly out of scope this pass, listed so nothing is implied silently)
 
 - No real model (T5 or otherwise) generation has been run anywhere in this

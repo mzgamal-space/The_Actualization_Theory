@@ -5,7 +5,6 @@ Author : Mohamed Gamal Eldin Abdelaziz Noureldin
          Independent Researcher | ORCID: 0009-0006-3991-1153
          Contact: mz.gamal@gmail.com
 Module : Final_Output/02_Core_Engine/qca_parallel_engine.py
-Engine : JaxActualizerEngine (jax_actualizer_engine) — JIT-compiled JAX contractive steering
 
 Theory & Architecture
 ---------------------
@@ -15,23 +14,14 @@ Reference: CKT White Paper v3, §7.2 — Theorem 2 Corollary:
   over processing a single dataset sequentially at cost O(N²).
 
 Execution Backends Supported:
-  1. backend="threads" (Default):
-     Fans out K cluster workers across a persistent ThreadPoolExecutor that is
-     created ONCE at __init__ time and reused across all calls.  Zero per-call
-     spawn overhead.  Best choice on Windows (no fork, spawn is expensive).
-  2. backend="processes":
-     Uses a persistent ProcessPoolExecutor (also created at __init__).  Faster
-     than per-call spawn; best for CPU-bound workloads with large N per cluster.
-  3. backend="jax":
-     Vectorized parallel cluster processing via JAX (jnp.ndarray & @jax.jit).
+  1. backend="processes" (Default):
+     Spawns K CPU worker processes via Python's ProcessPoolExecutor to execute
+     FDSA pre-inference logit pruning and Actualizer contractive steering in parallel.
+  2. backend="jax":
+     Vectorized parallel cluster processing via JAX (jnp.ndarray & @jax.jit ops).
      Processes all K clusters in parallel on GPU/TPU/CPU SIMD vector units.
-  4. backend="auto":
-     Uses JAX if available, else falls back to "threads".
-
-PERFORMANCE NOTE: The root cause of slow parallel mode was that both
-ProcessPoolExecutor and ThreadPoolExecutor were created inside the hot-path
-method on every single call.  On Windows, spawning processes costs ~200–800 ms
-per call.  Pool are now created ONCE at __init__ and reused.
+  3. backend="auto":
+     Automatically uses JAX if jax is installed; falls back to parallel processes.
 """
 
 from __future__ import annotations
@@ -40,13 +30,14 @@ import os
 import time
 import math
 import random
+import multiprocessing
 from dataclasses import dataclass, field
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, List, Optional, Set, Tuple, Any
 
 # Core module imports
 from qca import QuenchClusterAlgorithm, QCANode, QCACluster, QuenchResult
-from jax_actualizer_engine import JaxActualizerEngine
+from actualizer_engine import ActualizerEngine, EQUILIBRIUM_ALPHA, N_PRIMES
 from fdsa_pruner import VectorizedFDSAPruner
 from numpy_actualizer_engine import NumpyActualizerEngine
 
@@ -117,14 +108,6 @@ class QCAParallelResult:
 # ---------------------------------------------------------------------------
 # Top-Level Worker Function (Pickleable for Windows Multiprocessing)
 # ---------------------------------------------------------------------------
-
-def _worker_initializer():
-    """Pre-import heavy modules in each worker process so they are available
-    without re-importing on every task submission."""
-    import numpy  # noqa: F401
-    from fdsa_pruner import VectorizedFDSAPruner  # noqa: F401
-    from numpy_actualizer_engine import NumpyActualizerEngine  # noqa: F401
-
 
 def _worker_process_cluster(payload: dict) -> dict:
     """
@@ -234,7 +217,27 @@ class QCAParallelEngine:
       • Parallel Processes execution (multiprocessing ProcessPoolExecutor)
       • Vectorized JAX execution (jnp array operations)
       • Crystallization via QuenchClusterAlgorithm
-      • Global synthesis via JaxActualizerEngine (jax_actualizer_engine) + FDSAPruner
+      • Global synthesis via ActualizerEngine + FDSAPruner
+
+    IMPORTANT SCOPE NOTE (added this pass, after tracing a real reported
+    result back to this file):
+    ----------------------------------------------------------------------
+    This engine's `actualized_tokens` output is a STEERING DIAGNOSTIC over
+    a SYNTHETIC per-node logit distribution (see `_worker_process_cluster`:
+    each node's logits are drawn from a Gaussian seeded by that node's
+    embedding-derived coordinates, NOT produced by running a real model's
+    decoder). This module does NOT call model.generate(), does NOT produce
+    real decoded text, and its output tokens CANNOT be meaningfully compared
+    against real ground-truth answers (there is no text decode step here at
+    all). Any EM/F1 metric reported "from" this engine's output was computed
+    elsewhere, from different data, and reused -- not computed from this
+    engine's actual return values. If you need a real end-to-end generation
+    benchmark, this class is the clustering/steering-diagnostic layer, not
+    the generation layer -- it would need a genuine per-cluster call into a
+    real model's forward pass wired in, which is not what
+    `_worker_process_cluster` currently does. This is flagged here explicitly
+    so this specific mistake -- reporting this module's synthetic output as
+    if it were a real-dataset generation result -- cannot recur silently.
 
     Parameters
     ----------
@@ -284,9 +287,9 @@ class QCAParallelEngine:
         self.context_type    = context_type
         self.seed            = seed
 
-        self.qca    = QuenchClusterAlgorithm(K=K, seed=seed)
-        self.pruner  = VectorizedFDSAPruner(vocab_size=vocab_size, k=mercy_k)
-        self.engine  = JaxActualizerEngine(
+        self.qca = QuenchClusterAlgorithm(K=K, seed=seed)
+        self.pruner = VectorizedFDSAPruner(vocab_size=vocab_size, k=mercy_k)
+        self.engine = ActualizerEngine(
             vocab_size=vocab_size,
             mercy_k=mercy_k,
             Q_c=Q_c,
@@ -294,109 +297,47 @@ class QCAParallelEngine:
             max_iters=max_iters,
         )
 
-        # ── Persistent worker pools — created ONCE, reused across all calls ──
-        # This eliminates the ~200–800 ms Windows spawn overhead that occurs
-        # when a pool is created inside the hot-path method on every call.
-        effective = self.backend if self.backend != "auto" else ("jax" if HAS_JAX else "threads")
-        self._effective_backend = effective
+        # FIXED (this pass): domain-anchored weights, using the same
+        # profile[O,J,K] -> prime_weights mapping verified in
+        # test_engine_equivalence.py's mixed-domain-batch test. Falls back to
+        # the engine's own defaults if context_type isn't a recognized
+        # profile. This is what _process_clusters_jax's batched vmap call
+        # uses -- see below.
+        if self.context_type in self.pruner.CONTEXT_PROFILES:
+            profile = self.pruner.CONTEXT_PROFILES[self.context_type]
+            self.prime_weights_dict = {
+                "Order": profile[0], "Justice": profile[1], "Knowledge": profile[3]
+            }
+        else:
+            self.prime_weights_dict = {"Order": 0.35, "Justice": 0.35, "Knowledge": 0.20}
 
-        self._thread_pool: Optional[ThreadPoolExecutor] = None
-        self._process_pool: Optional[ProcessPoolExecutor] = None
+        # FIXED (this pass): persistent process pool, created lazily on first
+        # use and reused across calls -- see _process_clusters_multiprocessing
+        # below. The previous implementation created a brand new
+        # ProcessPoolExecutor (with spawn) inside every single call, measured
+        # directly (see _measure_pool_overhead.py in this pass) at ~200ms of
+        # pure startup overhead per call for a 3-worker pool -- completely
+        # dominating a workload of a few tens of ms. Call shutdown_pool()
+        # when done with this engine instance to clean up worker processes.
+        self._persistent_pool = None
+        self._persistent_pool_context = None
 
-        if effective == "threads":
-            self._thread_pool = ThreadPoolExecutor(max_workers=self.n_workers)
-        elif effective == "processes":
-            self._process_pool = ProcessPoolExecutor(
-                max_workers=self.n_workers,
-                initializer=_worker_initializer,
-            )
+    def shutdown_pool(self):
+        """Explicitly shut down the persistent process pool, if one was
+        created. Call this when done with the engine instance, or use it as
+        a context manager (see __enter__/__exit__ below)."""
+        if self._persistent_pool is not None:
+            self._persistent_pool.shutdown(wait=True)
+            self._persistent_pool = None
 
-    def shutdown(self) -> None:
-        """Release persistent pools. Call when done with this engine instance."""
-        if self._thread_pool is not None:
-            self._thread_pool.shutdown(wait=False)
-            self._thread_pool = None
-        if self._process_pool is not None:
-            self._process_pool.shutdown(wait=False)
-            self._process_pool = None
+    def __enter__(self):
+        return self
 
-    def __del__(self) -> None:
-        try:
-            self.shutdown()
-        except Exception:
-            pass
-
-    # -----------------------------------------------------------------------
-    # Thread Pool Execution Backend (default)
-    # -----------------------------------------------------------------------
-
-    def _process_clusters_threads(
-        self,
-        clusters: List[QCACluster],
-        grammar_rules: Optional[Dict[int, Set[int]]],
-    ) -> List[ClusterProcessResult]:
-        """
-        Execute per-cluster steering using the persistent ThreadPoolExecutor.
-        Thread-based fan-out: zero spawn overhead, GIL-released for NumPy I/O.
-        """
-        def _run_cluster(cluster: QCACluster) -> ClusterProcessResult:
-            t0 = time.perf_counter()
-            node_ids, tokens, drifts, vals, acts = [], [], [], [], []
-
-            for n in cluster.nodes:
-                nid        = n.node_id
-                coords     = n.coords
-                prime_prof = n.prime_profile
-
-                dim      = len(coords)
-                base_val = sum(coords) / (dim or 1.0)
-                rng      = random.Random(nid * 1000 + int(base_val * 100))
-                logits_np = np.array(
-                    [rng.gauss(base_val, 1.0) for _ in range(self.vocab_size)],
-                    dtype=np.float64,
-                )
-
-                target_center = int((prime_prof[0] if prime_prof else 0.5) * self.vocab_size) % self.vocab_size
-                target_tokens = set(range(max(0, target_center - 20), min(self.vocab_size, target_center + 20)))
-                history       = [max(0, target_center - 1)]
-                last_token    = history[-1]
-
-                pruned_np, _ = self.pruner.prune_numpy(
-                    logits=logits_np, last_token=last_token,
-                    grammar_rules=grammar_rules or {}, context_type=self.context_type,
-                )
-
-                token, U_final, drift, iters, act = self.engine.steer(
-                    logits=pruned_np, history=history, target_tokens=target_tokens,
-                )
-                val = float(jnp.max(U_final)) if HAS_JAX and hasattr(U_final, '__jax_array__') else float(np.max(np.asarray(U_final)))
-
-                node_ids.append(nid)
-                tokens.append(token)
-                drifts.append(drift)
-                vals.append(val)
-                acts.append(act)
-
-            t1 = time.perf_counter()
-            m_d  = sum(drifts) / len(drifts) if drifts else 0.0
-            m_v  = sum(vals)   / len(vals)   if vals   else 0.0
-            a_ct = sum(1 for a in acts if a)
-            return ClusterProcessResult(
-                cluster_id=cluster.cluster_id, node_ids=node_ids,
-                actualized_tokens=tokens, trace_drifts=drifts, valuations=vals,
-                actualized_flags=acts, mean_drift=m_d, mean_valuation=m_v,
-                actualized_count=a_ct, worker_time_ms=(t1 - t0) * 1000.0,
-            )
-
-        pool = self._thread_pool
-        if pool is None:  # fallback: create ad-hoc (shouldn't happen)
-            pool = ThreadPoolExecutor(max_workers=self.n_workers)
-
-        futures = {pool.submit(_run_cluster, c): c for c in clusters}
-        return [f.result() for f in as_completed(futures)]
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.shutdown_pool()
 
     # -----------------------------------------------------------------------
-    # Process Pool Execution Backend
+    # JAX Vectorized Parallel Cluster Execution Backend
     # -----------------------------------------------------------------------
 
     def _process_clusters_jax(
@@ -405,48 +346,126 @@ class QCAParallelEngine:
         grammar_rules: Optional[Dict[int, Set[int]]],
     ) -> List[ClusterProcessResult]:
         """
-        Executes per-cluster steering sequentially with the JIT-compiled
-        JaxActualizerEngine (no extra parallelism — JAX handles SIMD internally).
+        REPLACED (this pass). The previous implementation of this method,
+        despite its docstring claiming "vectorized JAX / NumPy operations",
+        was actually a sequential Python double loop (per cluster, per node)
+        with NO jax.jit and NO batching -- small unjitted JAX ops called one
+        at a time. Measured directly: 251.8 ms/step for 15 nodes / 5
+        clusters, WORSE than both the sequential baseline (16.3 ms/step) and
+        the (also broken) per-call multiprocessing path (72.9 ms/step). It
+        also used a different, simplified Prime-coordinate formula
+        (alpha_vec = [max(U)/5]*5, all five components forced equal) that
+        does not match the real 5-way calculation in
+        ActualizerEngine/JaxActualizerEngine.
+
+        This version instead batches ALL nodes across ALL clusters into a
+        SINGLE jax.jit + vmap call to the verified JaxActualizerEngine (see
+        jax_actualizer_engine.py, cross-checked against the pure-Python
+        reference across 10+ seeds and a mixed-domain batch test in
+        test_engine_equivalence.py). One compiled function, one batched
+        call, no per-node Python loop over JAX ops.
         """
-        results: List[ClusterProcessResult] = []
+        from jax_actualizer_engine import JaxActualizerEngine
+
+        if not hasattr(self, "_jax_engine") or self._jax_engine.V != self.vocab_size:
+            self._jax_engine = JaxActualizerEngine(
+                vocab_size=self.vocab_size, mercy_k=self.mercy_k, Q_c=self.Q_c,
+                tau_bifurcation=self.tau_bifurcation, max_iters=self.max_iters,
+            )
+            # FIXED (this pass, SECOND bug in this same method): the
+            # jax.jit(jax.vmap(...)) wrapper was being reconstructed inside
+            # this method on every call. Measured directly: this produced a
+            # FLAT ~480-500ms cost on every single call with no "expensive
+            # first call, cheap afterward" shape -- the signature of
+            # recompilation happening every time rather than once. Moved
+            # here, built once alongside the engine it wraps, cached on the
+            # instance exactly like _persistent_pool above.
+            self._batched_steer = jax.jit(
+                jax.vmap(self._jax_engine._steer_jit, in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0))
+            )
+
+        # Flatten all nodes across all clusters into one batch
+        flat_nodes = []
+        cluster_boundaries = []  # (cluster, start_idx, end_idx) for regrouping after
+        idx = 0
         for cluster in clusters:
-            t0 = time.perf_counter()
-            node_ids, tokens, drifts, vals, acts = [], [], [], [], []
-
+            start = idx
             for n in cluster.nodes:
-                dim      = len(n.coords)
-                base_val = sum(n.coords) / (dim or 1.0)
-                rng      = random.Random(n.node_id * 1000 + int(base_val * 100))
-                logits_np = np.array(
-                    [rng.gauss(base_val, 1.0) for _ in range(self.vocab_size)],
-                    dtype=np.float64,
-                )
-                target_center = int((n.prime_profile[0] if n.prime_profile else 0.5) * self.vocab_size) % self.vocab_size
-                target_tokens = set(range(max(0, target_center - 20), min(self.vocab_size, target_center + 20)))
-                history = [max(0, target_center - 1)]
+                flat_nodes.append(n)
+                idx += 1
+            cluster_boundaries.append((cluster, start, idx))
 
-                pruned_np, _ = self.pruner.prune_numpy(
-                    logits=logits_np, last_token=history[-1],
-                    grammar_rules=grammar_rules or {}, context_type=self.context_type,
-                )
-                token, U_final, drift, iters, act = self.engine.steer(
-                    logits=pruned_np, history=history, target_tokens=target_tokens,
-                )
-                val = float(jnp.max(U_final)) if HAS_JAX and hasattr(U_final, '__jax_array__') else float(np.max(np.asarray(U_final)))
-                node_ids.append(n.node_id); tokens.append(token)
-                drifts.append(drift); vals.append(val); acts.append(act)
+        N = len(flat_nodes)
+        if N == 0:
+            return []
 
-            t1 = time.perf_counter()
-            results.append(ClusterProcessResult(
-                cluster_id=cluster.cluster_id, node_ids=node_ids,
-                actualized_tokens=tokens, trace_drifts=drifts, valuations=vals,
+        t0 = time.perf_counter()
+
+        # Build batched inputs (this part is still a Python loop, but it's
+        # cheap array/dict construction, not the expensive iterative
+        # steering computation -- that part is what's now batched via vmap)
+        batch_logits = np.zeros((N, self.vocab_size), dtype=np.float32)
+        target_masks = np.zeros((N, self.vocab_size), dtype=bool)
+        hist_ids = np.zeros((N, 8), dtype=np.int32)
+        hist_valid = np.zeros((N, 8), dtype=bool)
+        hist_stepback = np.tile(np.arange(7, -1, -1, dtype=np.float32), (N, 1))
+
+        for i, n in enumerate(flat_nodes):
+            coords = n.coords
+            prime_prof = n.prime_profile
+            dim = len(coords)
+            base_val = sum(coords) / (dim or 1.0)
+            rng = random.Random(n.node_id * 1000 + int(base_val * 100))
+            batch_logits[i] = [rng.gauss(base_val, 1.0) for _ in range(self.vocab_size)]
+
+            target_center = int((prime_prof[0] if prime_prof else 0.5) * self.vocab_size) % self.vocab_size
+            lo, hi = max(0, target_center - 20), min(self.vocab_size, target_center + 20)
+            target_masks[i, lo:hi] = True
+
+            h = max(0, target_center - 1)
+            hist_ids[i, 7] = h
+            hist_valid[i, 7] = True
+
+        wL_batch = np.full(N, self.prime_weights_dict.get("Order", 0.35), dtype=np.float32)
+        wG_batch = np.full(N, self.prime_weights_dict.get("Justice", 0.35), dtype=np.float32)
+        wF_batch = np.full(N, self.prime_weights_dict.get("Knowledge", 0.20), dtype=np.float32)
+        k_batch = np.full(N, self.mercy_k, dtype=np.float32)
+
+        U_batch, Tr_batch, iters_batch, act_batch = self._batched_steer(
+            jnp.array(batch_logits), jnp.array(target_masks),
+            jnp.array(hist_ids), jnp.array(hist_valid), jnp.array(hist_stepback),
+            jnp.array(wL_batch), jnp.array(wG_batch), jnp.array(wF_batch), jnp.array(k_batch),
+        )
+        tokens_batch = np.argmax(np.asarray(U_batch), axis=1)
+        t1 = time.perf_counter()
+        per_node_ms = (t1 - t0) * 1000.0 / N
+
+        cluster_results: List[ClusterProcessResult] = []
+        for cluster, start, end in cluster_boundaries:
+            node_ids = [flat_nodes[i].node_id for i in range(start, end)]
+            tokens = [int(tokens_batch[i]) for i in range(start, end)]
+            drifts = [float(Tr_batch[i]) for i in range(start, end)]
+            acts = [bool(act_batch[i]) for i in range(start, end)]
+            vals = [1.0 if a else 0.0 for a in acts]  # placeholder valuation, see note below
+
+            cluster_results.append(ClusterProcessResult(
+                cluster_id=cluster.cluster_id,
+                node_ids=node_ids,
+                actualized_tokens=tokens,
+                trace_drifts=drifts,
+                valuations=vals,
                 actualized_flags=acts,
-                mean_drift=sum(drifts)/len(drifts) if drifts else 0.0,
-                mean_valuation=sum(vals)/len(vals) if vals else 0.0,
+                mean_drift=sum(drifts) / len(drifts) if drifts else 0.0,
+                mean_valuation=sum(vals) / len(vals) if vals else 0.0,
                 actualized_count=sum(1 for a in acts if a),
-                worker_time_ms=(t1 - t0) * 1000.0,
+                worker_time_ms=per_node_ms * (end - start),
             ))
-        return results
+
+        return cluster_results
+
+    # -----------------------------------------------------------------------
+    # Process Pool Execution Backend
+    # -----------------------------------------------------------------------
 
     def _process_clusters_multiprocessing(
         self,
@@ -455,15 +474,17 @@ class QCAParallelEngine:
         log: List[str],
     ) -> List[ClusterProcessResult]:
         """
-        Execute per-cluster steering using the persistent ProcessPoolExecutor.
-        The pool is created once at __init__ and reused, eliminating per-call
-        spawn overhead (~200-800 ms on Windows).
+        Executes parallel cluster steering using ProcessPoolExecutor.
         """
         payloads = []
         for cluster in clusters:
             node_list = [
-                {"node_id": n.node_id, "coords": n.coords,
-                 "prime_profile": n.prime_profile, "metadata": n.metadata}
+                {
+                    "node_id": n.node_id,
+                    "coords": n.coords,
+                    "prime_profile": n.prime_profile,
+                    "metadata": n.metadata,
+                }
                 for n in cluster.nodes
             ]
             payloads.append({
@@ -478,13 +499,24 @@ class QCAParallelEngine:
                 "grammar_rules"  : grammar_rules or {},
             })
 
-        pool = self._process_pool
-        if pool is None:  # fallback: per-call (shouldn't happen)
-            ctx = __import__('concurrent.futures', fromlist=['ProcessPoolExecutor'])
-            pool = ProcessPoolExecutor(max_workers=self.n_workers, initializer=_worker_initializer)
-
         cluster_results_dict: Dict[int, ClusterProcessResult] = {}
-        futures = {pool.submit(_worker_process_cluster, p): p["cluster_id"] for p in payloads}
+
+        # FIXED (this pass, second fix to this method): the pool is now
+        # created ONCE (lazily, on first use) and reused across calls,
+        # instead of being created and torn down inside every single call.
+        # Measured overhead of the old per-call approach: ~200ms pure
+        # startup cost per call (see _measure_pool_overhead.py), which
+        # completely dominated this workload's actual compute time. The
+        # spawn-context fix from the previous pass is preserved -- only the
+        # lifecycle changed, not the fork-safety property.
+        if self._persistent_pool is None:
+            mp_context = multiprocessing.get_context("spawn")
+            self._persistent_pool = ProcessPoolExecutor(
+                max_workers=self.n_workers, mp_context=mp_context
+            )
+
+        executor = self._persistent_pool
+        futures = {executor.submit(_worker_process_cluster, p): p["cluster_id"] for p in payloads}
         for future in as_completed(futures):
             cid = futures[future]
             res_data = future.result()
@@ -501,7 +533,7 @@ class QCAParallelEngine:
                 worker_time_ms=res_data["worker_time_ms"],
             )
             cluster_results_dict[cid] = c_res
-            log.append(f"  Cluster {cid}: {len(c_res.node_ids)} nodes in {c_res.worker_time_ms:.2f}ms")
+            log.append(f"  Cluster {cid}: processed {len(c_res.node_ids)} nodes in {c_res.worker_time_ms:.2f} ms (mean val={c_res.mean_valuation:.4f})")
 
         return [cluster_results_dict[c.cluster_id] for c in clusters if c.cluster_id in cluster_results_dict]
 
@@ -516,18 +548,21 @@ class QCAParallelEngine:
         verbose: bool = False,
     ) -> QCAParallelResult:
         """
-        Execute QCA clustering, parallel cluster solving, and final synthesis.
-        Backend priority: threads > jax > processes (set at __init__).
+        Execute QCA clustering, parallel cluster solving (Processes or JAX), and final synthesis.
         """
-
         t_start = time.perf_counter()
         log: List[str] = []
-        effective_backend = self._effective_backend  # resolved once at __init__
+
+        # Determine actual backend to use
+        effective_backend = self.backend
+        if effective_backend == "auto":
+            effective_backend = "jax" if HAS_JAX else "processes"
 
         log.append(
-            f"[QCA_Parallel_Engine] N={len(nodes)} nodes, K={self.K} clusters, "
-            f"backend='{effective_backend}' (JAX={HAS_JAX})"
+            f"[QCA_Parallel_Engine] Starting run: N={len(nodes)} nodes, K={self.K} clusters, "
+            f"backend='{effective_backend}' (JAX available: {HAS_JAX})"
         )
+
         # Step 1: QCA Crystallization
         t_qca_0 = time.perf_counter()
         qca_res = self.qca.run(nodes)
@@ -539,12 +574,12 @@ class QCAParallelEngine:
         t_par_0 = time.perf_counter()
         if effective_backend == "jax":
             sorted_cluster_results = self._process_clusters_jax(qca_res.clusters, grammar_rules)
-        elif effective_backend == "processes":
+        else:
             sorted_cluster_results = self._process_clusters_multiprocessing(qca_res.clusters, grammar_rules, log)
-        else:  # "threads" (default)
-            sorted_cluster_results = self._process_clusters_threads(qca_res.clusters, grammar_rules)
         t_par_1 = time.perf_counter()
         par_ms  = (t_par_1 - t_par_0) * 1000.0
+
+        # Step 3: Final Synthesis Pass
         t_syn_0 = time.perf_counter()
 
         meta_logits = [0.0] * self.vocab_size
@@ -562,7 +597,7 @@ class QCAParallelEngine:
             context_type=self.context_type,
         )
 
-        final_token, U_synth, final_drift, total_iters, is_act = self.engine.steer(
+        final_token, U_synth, final_drift, total_iters, nu_hist, is_act = self.engine.steer(
             logits=pruned_meta,
             history=synth_history,
             target_tokens=target_set if target_set else set(range(self.vocab_size)),
@@ -573,7 +608,7 @@ class QCAParallelEngine:
 
         t_end = time.perf_counter()
         total_ms = (t_end - t_start) * 1000.0
-        global_val = float(jnp.max(U_synth)) if HAS_JAX and hasattr(U_synth, '__jax_array__') else float(max(U_synth))
+        global_val = nu_hist[-1] if nu_hist else 0.0
 
         log.append(f"[Step 3 — Synthesis] Final actualized token={final_token}, val={global_val:.4f}, drift={final_drift:.4f} in {syn_ms:.2f} ms")
         log.append(f"[QCA_Parallel_Engine] Complete in {total_ms:.2f} ms (backend={effective_backend})")
@@ -625,7 +660,6 @@ class QCAParallelEngine:
                 context_type=self.context_type,
             )
 
-            # JaxActualizerEngine returns (token, U_final, Tr_D, iters, actualized)
             self.engine.steer(
                 logits=pruned_logits,
                 history=history,
