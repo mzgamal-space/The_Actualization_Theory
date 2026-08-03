@@ -1,23 +1,24 @@
 """
-demo_qca_parallel.py — QCA Parallel Engine Interactive Demonstration
+demo_qca_parallel.py — QCA Parallel Engine & Pipeline Demonstration
 =====================================================================
 Author : Mohamed Gamal Eldin Abdelaziz Noureldin
          Independent Researcher | ORCID: 0009-0006-3991-1153
          Contact: mz.gamal@gmail.com
+Pipeline: Actualizer_Engine_FDSA_QCA v1.0.0 (CKT V3_U1)
 
-Demonstrates the QCA Parallel Engine pipeline:
+Demonstrates the QCA Parallel Engine and Unified Parallel Pipeline:
   Phase 1 — QCA Crystallization Front-End:
             Partitions a large problem dataset (N nodes) into K independent
             crystallization clusters using Quench Temperature T_q^RGG.
   Phase 2 — Parallel Cluster Execution:
-            Dispatches clusters to K parallel worker processes. Each process
-            independently executes FDSA vocabulary pruning and ActualizerEngine
+            Dispatches clusters to K parallel workers (ThreadPool or Processes).
+            Each worker executes FDSA vocabulary pruning and ActualizerEngine
             contractive steering.
   Phase 3 — Global Synthesis:
             Aggregates cluster actualized states and performs final FDSA + Actualizer
             pass to yield the globally unified solution S*.
-  Phase 4 — Empirical Speedup Benchmark:
-            Compares QCA Parallel execution against single-dataset sequential execution.
+  Phase 4 — Unified Parallel Pipeline Execution:
+            Runs ActualizerFDSAQCAPipeline in parallel mode across autoregressive steps.
 
 HOW TO RUN
 ----------
@@ -31,15 +32,24 @@ import sys
 import os
 import time
 import random
+import numpy as np
 
+# Ensure UTF-8 output encoding for Windows compatibility
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 # Add parent folders to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '02_Core_Engine'))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FINAL_OUTPUT_DIR = os.path.dirname(BASE_DIR)
+PIPELINE_DIR = os.path.join(FINAL_OUTPUT_DIR, "Actualizer_Engine_FDSA_QCA")
+CORE_ENGINE_DIR = os.path.join(FINAL_OUTPUT_DIR, "02_Core_Engine")
+
+sys.path.insert(0, PIPELINE_DIR)
+sys.path.insert(0, CORE_ENGINE_DIR)
 
 from qca import QCANode
 from qca_parallel_engine import QCAParallelEngine
+from pipeline import create_parallel_pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -83,12 +93,12 @@ def run_demo():
     print("  ║    Mohamed Gamal Eldin · ORCID 0009-0006-3991-1153                       ║")
     print("  ╚══════════════════════════════════════════════════════════════════════════╝")
     print(C.END)
-    time.sleep(0.2)
+    time.sleep(0.1)
 
     # Config
     VOCAB_SIZE = 1000
     K = 5
-    N = 200
+    N = 120
 
     section("CONFIG & INPUT DATASET GENERATION")
     tag("SETUP", C.BLUE, f"Problem Dataset Size N = {N} nodes")
@@ -108,7 +118,7 @@ def run_demo():
 
     tag("DATASET", C.GREEN, f"Created {len(nodes)} QCANodes with 5D spatial embeddings & 5-Prime profiles.")
 
-    # Initialize Engine
+    # Initialize Engine (processes / auto backend)
     engine = QCAParallelEngine(
         K=K,
         vocab_size=VOCAB_SIZE,
@@ -139,52 +149,56 @@ def run_demo():
     # Step 2: Parallel Cluster Execution
     # -----------------------------------------------------------------------
     section("PHASE 2 — PARALLEL CLUSTER EXECUTION (FDSA + ACTUALIZER WORKERS)")
-    tag("WORKERS", C.BLUE, f"Dispatching {K} clusters across parallel worker processes...")
+    tag("WORKERS", C.BLUE, f"Dispatching {K} clusters across parallel worker threads/processes...")
 
     t0_par = time.perf_counter()
     par_res = engine.process_parallel(nodes, verbose=False)
     t1_par = time.perf_counter()
-    par_time = (t1_par - t0_par) * 1000.0
 
     for c_res in par_res.cluster_results[:5]:
         act_str = f"{C.GREEN}{c_res.actualized_count}/{len(c_res.node_ids)} Actualized{C.END}"
         tag("WORKER", C.GREEN, f"Cluster {c_res.cluster_id:^3} complete in {c_res.worker_time_ms:.2f} ms | {act_str} | Mean Valuation ν = {c_res.mean_valuation:.4f} | Mean Drift Tr(D) = {c_res.mean_drift:.4f}")
-    if len(par_res.cluster_results) > 5:
-        tag("WORKERS", C.GREEN, f"All {len(par_res.cluster_results)} parallel clusters successfully processed & actualized.")
 
     # -----------------------------------------------------------------------
-    # Step 3: Global Synthesis
+    # Step 3: Global Synthesis & Pipeline Integration
     # -----------------------------------------------------------------------
-    section("PHASE 3 — GLOBAL SYNTHESIS (FINAL FDSA & ACTUALIZER PASS)")
+    section("PHASE 3 — GLOBAL SYNTHESIS & UNIFIED PIPELINE INTEGRATION")
     tag("SYNTHESIS", C.YELLOW, f"Collected {len(par_res.cluster_results)} cluster results into metacluster substrate.")
     tag("SYNTHESIS", C.GREEN, f"Final Actualized Global Token S* = {C.BOLD}{par_res.final_token}{C.END}")
     tag("SYNTHESIS", C.GREEN, f"Global Valuation ν_final = {C.BOLD}{par_res.global_valuation:.4f}{C.END}")
-    tag("SYNTHESIS", C.GREEN, f"Global Trace Drift Tr(D_μν) = {par_res.global_drift:.4f} (Bifurcation Gated: {'True' if par_res.is_actualized else 'False'})")
-
-    # -----------------------------------------------------------------------
-    # Step 4: Speedup Comparison
-    # -----------------------------------------------------------------------
-    section("PHASE 4 — EMPIRICAL SPEEDUP BENCHMARK")
-    tag("BENCHMARK", C.BLUE, "Running single-dataset sequential baseline for comparison...")
-
-    t0_seq = time.perf_counter()
-    t_seq = engine.process_sequential(nodes)
-    t1_seq = time.perf_counter()
-
-    speedup = t_seq / par_res.total_time_ms if par_res.total_time_ms > 0 else 1.0
+    tag("SYNTHESIS", C.GREEN, f"Global Trace Drift Tr(D_μν) = {par_res.global_drift:.4f} (Actualized: {'True' if par_res.is_actualized else 'False'})")
 
     print()
-    hr('─')
-    print(f"  {C.BOLD}LATENCY & SPEEDUP SUMMARY (N={N}, K={K}, V={VOCAB_SIZE:,}){C.END}")
-    hr('─')
-    print(f"  Sequential Baseline Processing Time : {C.RED}{t_seq:>8.2f} ms{C.END}")
-    print(f"  QCA Parallel Engine Total Time      : {C.GREEN}{par_res.total_time_ms:>8.2f} ms{C.END}")
-    print(f"    ├─ QCA Clustering Front-End       : {par_res.qca_time_ms:>8.2f} ms")
-    print(f"    ├─ Parallel Worker Execution      : {par_res.parallel_time_ms:>8.2f} ms")
-    print(f"    └─ Global Synthesis Pass          : {par_res.synthesis_time_ms:>8.2f} ms")
-    print(f"  {C.BOLD}NET PARALLEL SPEEDUP FACTOR         : {C.CYAN}{C.BOLD}{speedup:>8.2f}× faster{C.END}")
-    hr('─')
-    print()
+    tag("UNIFIED PIPELINE", C.CYAN, "Executing unified ActualizerFDSAQCAPipeline (ThreadPool Backend)...")
+    pipe = create_parallel_pipeline(vocab_size=VOCAB_SIZE, K=K, seed=42, verbose=False)
+    raw_logits = np.random.normal(-4.0, 1.5, size=(VOCAB_SIZE,))
+    p_res = pipe.run(context_ids=[10, 20, 30], logits=raw_logits, step=0)
+
+    tag("PIPELINE", C.GREEN,
+        f"Unified Parallel Pipeline: Selected Token = {p_res.final_token} | "
+        f"Stage 2 Parallel Latency = {p_res.parallel_result.parallel_time_ms:.2f} ms | "
+        f"Total End-to-End Latency = {p_res.total_time_ms:.2f} ms")
+
+    pipe.shutdown()
+
+    # -----------------------------------------------------------------------
+    # Step 4: Summary
+    # -----------------------------------------------------------------------
+    section("PHASE 4 — LATENCY & EXECUTION SUMMARY")
+    print(f"""
+  +--------------------------------------------------------------------+
+  |  Metric                             QCA Parallel Engine            |
+  |  ------------------------------------------------------------------|
+  |  Problem Size N                     {N:<30} |
+  |  Clusters K                         {K:<30} |
+  |  Vocabulary Size V                  {VOCAB_SIZE:<30,} |
+  |  Quench Temperature T_q             {qca_res.quench_temp:<30.6f} |
+  |  QCA Clustering Time                {par_res.qca_time_ms:<30.2f} ms |
+  |  Parallel Worker Processing Time    {par_res.parallel_time_ms:<30.2f} ms |
+  |  Global Synthesis Pass              {par_res.synthesis_time_ms:<30.2f} ms |
+  |  Total Engine Latency               {par_res.total_time_ms:<30.2f} ms |
+  +--------------------------------------------------------------------+
+""")
 
 
 if __name__ == "__main__":
